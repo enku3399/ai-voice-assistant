@@ -1,0 +1,341 @@
+'use client';
+
+import { useState, useRef } from 'react';
+
+interface HistoryItem {
+  role: 'user' | 'ai';
+  text: string;
+  imagePreview?: string; // Зургийн preview URL (зөвхөн UI-д харуулах)
+}
+
+export default function VoiceAssistant() {
+  const [status, setStatus] = useState<string>('Товч дарж ярина уу');
+  const [isListening, setIsListening] = useState<boolean>(false);
+  const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  // historyRef нь setHistory-тэй үргэлж синхрон байна.
+  // Closure-ийн асуудлаас зайлсхийж, onresult дотроос тухайн үеийн
+  // history-г найдвартай унших боломжийг олгоно.
+  const historyRef = useRef<HistoryItem[]>([]);
+  const recognitionRef = useRef<any>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentTranscriptRef = useRef<string>('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * History state болон ref-ийг хамтад нь шинэчлэх тусламжийн функц.
+   */
+  const updateHistory = (updater: (prev: HistoryItem[]) => HistoryItem[]) => {
+    setHistory((prev) => {
+      const next = updater(prev);
+      historyRef.current = next;
+      return next;
+    });
+  };
+
+  const startListening = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('Таны хөтөч дуу таних системийг дэмжихгүй байна. Chrome ашиглана уу.');
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'mn-MN';
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    // Transcript цуглуулах хувьсагчийг шинэчлэх
+    currentTranscriptRef.current = '';
+
+    recognition.onstart = () => {
+      setIsListening(true);
+      setStatus('Сонсож байна...');
+    };
+
+    recognition.onresult = (event: any) => {
+      // Хамгийн сүүлийн үр дүнг авна
+      const lastResult = event.results[event.results.length - 1];
+      const newWord: string = lastResult[0].transcript;
+
+      // Цугларсан transcript-д нэмнэ
+      currentTranscriptRef.current = (currentTranscriptRef.current + ' ' + newWord).trim();
+
+      // Өмнөх чимээгүй байдлын тоолуурыг цуцална
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
+
+      // 2 секунд чимээгүй болбол recognition зогсоож, серверт илгээнэ
+      silenceTimerRef.current = setTimeout(() => {
+        recognition.stop();
+
+        const finalTranscript = currentTranscriptRef.current;
+        currentTranscriptRef.current = '';
+
+        if (finalTranscript) {
+          // Тухайн үеийн history-г ref-ээс найдвартай авна
+          const historyBeforeCurrentMessage = historyRef.current;
+
+          // Хэрэглэгчийн шинэ мессежийг UI дээр нэмэх
+          updateHistory((prev) => [...prev, { role: 'user', text: finalTranscript }]);
+
+          // Шинэ transcript болон өмнөх history-г серверт илгээнэ
+          sendToBackend(finalTranscript, historyBeforeCurrentMessage);
+        }
+      }, 2000);
+    };
+
+    recognition.onerror = (event: any) => {
+      // 'no-speech' алдааг continuous горимд үл тоомсорлоно
+      if (event.error === 'no-speech') return;
+      console.error('Сонсох үеийн алдаа:', event.error);
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      setStatus('Алдаа гарлаа. Дахин оролдоно уу.');
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      setIsListening(false);
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+  };
+
+  /**
+   * Камерны товч дарахад файл сонгох / камер нээх функц.
+   * Утсан дээр capture="environment" нь арын камерыг нээнэ.
+   * Компьютер дээр файл сонгох цонх нээнэ.
+   */
+  const handleCaptureImage = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''; // Өмнөх сонголтыг цэвэрлэх
+      fileInputRef.current.click();
+    }
+  };
+
+  /**
+   * Файл сонгогдсон үед ажиллах функц.
+   * Зургийг Base64 руу хөрвүүлж, серверт илгээнэ.
+   */
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsProcessingImage(true);
+    setStatus('Зураг уншиж байна...');
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result as string;
+      // dataUrl нь "data:image/jpeg;base64,XXXX..." хэлбэртэй байна
+      // Зөвхөн Base64 хэсгийг авна (comma-ийн дараах хэсэг)
+      const base64Data = dataUrl.split(',')[1];
+
+      // Зургийн preview-г history-д нэмнэ
+      const historyBeforeCurrentMessage = historyRef.current;
+      updateHistory((prev) => [
+        ...prev,
+        { role: 'user', text: '[Зураг илгээв]', imagePreview: dataUrl },
+      ]);
+
+      // Серверт зураг болон текст хамт илгээнэ
+      sendToBackend('энэ зургийг уншиж өгөөч', historyBeforeCurrentMessage, base64Data);
+    };
+
+    reader.onerror = () => {
+      console.error('Зураг уншихад алдаа гарлаа.');
+      setStatus('Зураг уншихад алдаа гарлаа.');
+      setIsProcessingImage(false);
+    };
+
+    reader.readAsDataURL(file);
+  };
+
+  /**
+   * Текст болон өмнөх ярилцлагын түүхийг серверт илгээнэ.
+   * @param text - Хэрэглэгчийн шинэ хэлсэн үг
+   * @param historyToSend - Шинэ мессежийг оруулаагүй өмнөх ярилцлагын түүх
+   * @param image - Base64 зургийн өгөгдөл (заавал биш)
+   */
+  const sendToBackend = async (text: string, historyToSend: HistoryItem[], image?: string) => {
+    setStatus('Бодож байна...');
+
+    // History-г серверт илгээхдээ imagePreview талбарыг хасна (зөвхөн UI-д хэрэгтэй)
+    const cleanHistory = historyToSend.map(({ role, text }) => ({ role, text }));
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, history: cleanHistory, ...(image ? { image } : {}) }),
+      });
+
+      if (!res.ok) {
+        throw new Error('Серверээс алдаа буцаалаа.');
+      }
+
+      const data = await res.json();
+
+      // AI-ийн текстийг дэлгэцэнд нэмэх
+      if (data.reply) {
+        updateHistory((prev) => [...prev, { role: 'ai', text: data.reply }]);
+      }
+
+      // Дууны файлыг тоглуулах
+      if (data.audioBase64) {
+        setStatus('Хариулж байна...');
+        const audioUrl = `data:audio/mp3;base64,${data.audioBase64}`;
+        const audio = new Audio(audioUrl);
+
+        audio.play().catch((e) => {
+          console.error('Дуу тоглуулахад алдаа гарлаа:', e);
+          setStatus('Дуу тоглуулж чадсангүй.');
+        });
+
+        audio.onended = () => {
+          setStatus('Товч дарж ярина уу');
+        };
+      } else {
+        setStatus('Товч дарж ярина уу');
+      }
+
+    } catch (error) {
+      console.error('Холболтын алдаа:', error);
+      setStatus('Серверт алдаа гарлаа. Дахин оролдоно уу.');
+    } finally {
+      setIsProcessingImage(false);
+    }
+  };
+
+  const isBusy = isListening || status === 'Бодож байна...' || status === 'Хариулж байна...' || isProcessingImage;
+
+  return (
+    <div className="min-h-screen bg-[#f0f4f8] text-[#1a202c] flex flex-col items-center py-10 font-sans">
+      <div className="w-full max-w-2xl px-6 flex justify-between items-center mb-8">
+        <h1 className="text-2xl font-bold text-[#2b6cb0]">Дуут AI Туслагч</h1>
+        <span className="text-gray-500 text-sm">Ахмад настнуудад зориулсан</span>
+      </div>
+
+      <div className="flex-1 w-full max-w-2xl px-6 overflow-y-auto mb-8 flex flex-col gap-4">
+        {history.length === 0 ? (
+          <div className="text-center text-gray-400 mt-20">
+            Та доорх товчийг дараад яриагаа эхлүүлнэ үү.
+          </div>
+        ) : (
+          history.map((msg, index) => (
+            <div
+              key={index}
+              className={`p-4 rounded-2xl max-w-[80%] text-lg shadow-sm ${
+                msg.role === 'user'
+                  ? 'bg-[#3182ce] text-white self-end rounded-tr-sm'
+                  : 'bg-white text-gray-800 self-start border border-gray-200 rounded-tl-sm'
+              }`}
+            >
+              <span className="text-xs opacity-70 block mb-1">
+                {msg.role === 'user' ? 'Та' : 'AI Туслагч'}
+              </span>
+              {/* Зургийн preview харуулах */}
+              {msg.imagePreview && (
+                <img
+                  src={msg.imagePreview}
+                  alt="Илгээсэн зураг"
+                  className="rounded-xl mb-2 max-w-full max-h-48 object-contain border border-white/30"
+                />
+              )}
+              {msg.text}
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Далд файл оруулах input — камер болон файл сонгоход ашиглана */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
+      <div className="w-full max-w-2xl px-6 flex flex-col items-center pb-10">
+        <div
+          className={`text-xl mb-6 font-medium transition-colors ${
+            status === 'Сонсож байна...'
+              ? 'text-red-500 animate-pulse'
+              : status === 'Хариулж байна...'
+              ? 'text-green-600'
+              : status === 'Зураг уншиж байна...' || status === 'Бодож байна...'
+              ? 'text-yellow-600 animate-pulse'
+              : 'text-gray-600'
+          }`}
+        >
+          {status}
+        </div>
+
+        {/* Товчнуудын мөр */}
+        <div className="flex items-center gap-6">
+
+          {/* Зураг авах товч */}
+          <div className="relative">
+            {isProcessingImage && (
+              <>
+                <div className="absolute inset-0 bg-green-400 rounded-full animate-ping opacity-75"></div>
+                <div className="absolute -inset-3 bg-green-300 rounded-full animate-pulse opacity-50"></div>
+              </>
+            )}
+            <button
+              onClick={handleCaptureImage}
+              disabled={isBusy}
+              title="Зураг авах / Файл сонгох"
+              className="relative z-10 w-20 h-20 rounded-full flex flex-col items-center justify-center text-white shadow-xl transition-transform transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:hover:scale-100 bg-[#38a169]"
+            >
+              {/* Камерны дүрс */}
+              <svg className="w-8 h-8 mb-1" fill="currentColor" viewBox="0 0 20 20">
+                <path
+                  fillRule="evenodd"
+                  d="M4 5a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V7a2 2 0 00-2-2h-1.586a1 1 0 01-.707-.293l-1.121-1.121A2 2 0 0011.172 3H8.828a2 2 0 00-1.414.586L6.293 4.707A1 1 0 015.586 5H4zm6 9a3 3 0 100-6 3 3 0 000 6z"
+                  clipRule="evenodd"
+                />
+              </svg>
+              <span className="font-medium text-xs">Зураг</span>
+            </button>
+          </div>
+
+          {/* Микрофоны товч */}
+          <div className="relative">
+            {/* Сонсож байх үеийн долгион */}
+            {isListening && (
+              <>
+                <div className="absolute inset-0 bg-blue-400 rounded-full animate-ping opacity-75"></div>
+                <div className="absolute -inset-4 bg-blue-300 rounded-full animate-pulse opacity-50"></div>
+              </>
+            )}
+
+            <button
+              onClick={startListening}
+              disabled={isBusy}
+              className={`relative z-10 w-28 h-28 rounded-full flex flex-col items-center justify-center text-white shadow-xl transition-transform transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:hover:scale-100 ${
+                isListening ? 'bg-red-500' : 'bg-[#3182ce]'
+              }`}
+            >
+              <svg className="w-10 h-10 mb-1" fill="currentColor" viewBox="0 0 20 20">
+                <path
+                  fillRule="evenodd"
+                  d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z"
+                  clipRule="evenodd"
+                />
+              </svg>
+              <span className="font-medium">Дарж ярих</span>
+            </button>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,16 @@
+{
+    "name": "Дуут Туслагч",
+    "short_name": "AI Туслагч",
+    "description": "Ахмад настнуудад зориулсан хиймэл оюунт туслагч",
+    "start_url": "/voice",
+    "display": "standalone",
+    "background_color": "#f0f4f8",
+    "theme_color": "#3182ce",
+    "icons": [
+      {
+        "src": "/icon.png",
+        "sizes": "512x512",
+        "type": "image/png"
+      }
+    ]
+  }
