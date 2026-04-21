@@ -33,10 +33,18 @@ export default function VoiceAssistant() {
     });
   };
 
+  const handleDonate = () => {
+    alert('Удахгүй: Энд таны QPay QR код эсвэл дансны дугаар харагдах болно. ❤️');
+  };
+
   const startListening = () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      alert('Таны хөтөч дуу таних системийг дэмжихгүй байна. Chrome ашиглана уу.');
+      alert(
+        'Таны хөтөч дуу таних системийг дэмжихгүй байна.\n\n' +
+        'Та Chrome эсвэл Safari хөтөч дээр нээж ашиглана уу.\n' +
+        '(Messenger, Facebook зэрэг апп-ын дотоод хөтөч дэмжихгүй.)'
+      );
       return;
     }
 
@@ -92,6 +100,13 @@ export default function VoiceAssistant() {
       if (event.error === 'no-speech') return;
       console.error('Сонсох үеийн алдаа:', event.error);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        alert(
+          'Микрофоны зөвшөөрөл олгоогүй байна.\n\n' +
+          'Та Chrome эсвэл Safari хөтөч дээр нээж, микрофоны зөвшөөрлийг зөвшөөрнө үү.\n' +
+          '(Messenger, Facebook зэрэг апп-ын дотоод хөтөч дэмжихгүй.)'
+        );
+      }
       setStatus('Алдаа гарлаа. Дахин оролдоно уу.');
       setIsListening(false);
     };
@@ -215,9 +230,46 @@ export default function VoiceAssistant() {
 
   return (
     <div className="min-h-screen bg-[#f0f4f8] text-[#1a202c] flex flex-col items-center py-10 font-sans">
-      <div className="w-full max-w-2xl px-6 flex justify-between items-center mb-8">
-        <h1 className="text-2xl font-bold text-[#2b6cb0]">Дуут AI Туслагч</h1>
-        <span className="text-gray-500 text-sm">Ахмад настнуудад зориулсан</span>
+      <div className="w-full max-w-2xl px-4 sm:px-6 mb-6">
+        {/* Нэр болон товчнуудын мөр */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Апп-ын нэр */}
+          <h1 className="text-xl sm:text-2xl font-bold text-[#2b6cb0] mr-auto whitespace-nowrap">
+            🎙️ Дуут Туслагч
+          </h1>
+
+          {/* Урамшуулах товч */}
+          <button
+            onClick={handleDonate}
+            title="Урамшуулах"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-yellow-400 hover:bg-yellow-500 active:scale-95 text-yellow-900 font-semibold text-sm shadow transition-transform"
+          >
+            {/* Зүрхний дүрс */}
+            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+              <path
+                fillRule="evenodd"
+                d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z"
+                clipRule="evenodd"
+              />
+            </svg>
+            Урамшуулах
+          </button>
+
+          {/* Гарах товч */}
+          <a
+            href="/"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-gray-200 hover:bg-gray-300 active:scale-95 text-gray-700 font-semibold text-sm shadow transition-transform"
+          >
+            {/* Гарах дүрс */}
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h6a2 2 0 012 2v1" />
+            </svg>
+            Гарах
+          </a>
+        </div>
+
+        {/* Дэд гарчиг — зөвхөн том дэлгэц дээр харагдана */}
+        <p className="hidden md:block text-gray-500 text-sm mt-1">Ахмад настнуудад зориулсан дуут туслагч</p>
       </div>
 
       <div className="flex-1 w-full max-w-2xl px-6 overflow-y-auto mb-8 flex flex-col gap-4">
