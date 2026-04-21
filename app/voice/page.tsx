@@ -37,7 +37,20 @@ export default function VoiceAssistant() {
     alert('Удахгүй: Энд таны QPay QR код эсвэл дансны дугаар харагдах болно. ❤️');
   };
 
-  const startListening = () => {
+  const startListening = async () => {
+    // In-app browser болон микрофоны дэмжлэгийг шалгах
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert('Та гар утасны үндсэн Chrome эсвэл Safari хөтөч дээр нээнэ үү. Messenger дотор микрофон ажиллахгүй.');
+      return;
+    }
+
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err: any) {
+      alert('Та гар утасны үндсэн Chrome эсвэл Safari хөтөч дээр нээнэ үү. Messenger дотор микрофон ажиллахгүй.');
+      return;
+    }
+
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       alert(
@@ -218,11 +231,13 @@ export default function VoiceAssistant() {
         setStatus('Товч дарж ярина уу');
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('Холболтын алдаа:', error);
       setStatus('Серверт алдаа гарлаа. Дахин оролдоно уу.');
+      alert('Алдаа гарлаа: ' + error.message);
     } finally {
       setIsProcessingImage(false);
+      setIsListening(false);
     }
   };
 
