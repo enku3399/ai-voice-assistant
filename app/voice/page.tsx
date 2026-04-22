@@ -11,6 +11,7 @@ interface HistoryItem {
 export default function VoiceAssistant() {
   const [status, setStatus] = useState<string>('Товч дарж ярина уу');
   const [isListening, setIsListening] = useState<boolean>(false);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   // historyRef нь setHistory-тэй үргэлж синхрон байна.
@@ -19,7 +20,7 @@ export default function VoiceAssistant() {
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentTranscriptRef = useRef<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Гараар зогсоосон эсэхийг тэмдэглэх — onend дотор давхар илгээхгүйн тулд
+  // Гараар зогсоосон эсэхийг тэмдэглэх — onend дотор боловсруулалт хийхийн тулд
   const manualStopRef = useRef<boolean>(false);
 
   /**
@@ -38,38 +39,56 @@ export default function VoiceAssistant() {
   };
 
   /**
-   * Дуу хураалтыг шууд зогсоож, цугларсан transcript-г серверт илгээнэ.
-   * Silence timer-г цуцалж, тэр даруй боловсруулалт эхлүүлнэ.
+   * Текст болон өмнөх ярилцлагын түүхийг серверт илгээнэ.
    */
-  const stopListeningAndProcess = () => {
-    // Silence timer-г шууд цуцлах
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
+  const sendToBackend = async (text: string, historyToSend: HistoryItem[], image?: string) => {
+    setIsProcessing(true);
+    setStatus('Бодож байна...');
 
-    const finalTranscript = currentTranscriptRef.current;
-    currentTranscriptRef.current = '';
+    const cleanHistory = historyToSend.map(({ role, text }) => ({ role, text }));
 
-    // Гараар зогсоосон гэж тэмдэглэх (onend дотор давхар илгээхгүй)
-    manualStopRef.current = true;
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, history: cleanHistory, ...(image ? { image } : {}) }),
+      });
 
-    // Recognition-г зогсоох
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (_) {}
-    }
+      if (!res.ok) {
+        throw new Error('Серверээс алдаа буцаалаа.');
+      }
 
-    // UI-г шууд шинэчлэх
-    setIsListening(false);
+      const data = await res.json();
 
-    if (finalTranscript) {
-      const historyBeforeCurrentMessage = historyRef.current;
-      updateHistory((prev) => [...prev, { role: 'user', text: finalTranscript }]);
-      sendToBackend(finalTranscript, historyBeforeCurrentMessage);
-    } else {
-      setStatus('Товч дарж ярина уу');
+      if (data.reply) {
+        updateHistory((prev) => [...prev, { role: 'ai', text: data.reply }]);
+      }
+
+      if (data.audioBase64) {
+        setStatus('Хариулж байна...');
+        const audioUrl = `data:audio/mp3;base64,${data.audioBase64}`;
+        const audio = new Audio(audioUrl);
+
+        audio.play().catch((e) => {
+          console.error('Дуу тоглуулахад алдаа гарлаа:', e);
+          setStatus('Дуу тоглуулж чадсангүй.');
+        });
+
+        audio.onended = () => {
+          setStatus('Товч дарж ярина уу');
+        };
+      } else {
+        setStatus('Товч дарж ярина уу');
+      }
+
+    } catch (error: any) {
+      console.error('Холболтын алдаа:', error);
+      setStatus('Серверт алдаа гарлаа. Дахин оролдоно уу.');
+      alert('Алдаа гарлаа: ' + error.message);
+    } finally {
+      // Амжилттай болсон ч, алдаа гарсан ч loading state-үүдийг заавал цэвэрлэнэ
+      setIsProcessing(false);
+      setIsProcessingImage(false);
     }
   };
 
@@ -78,7 +97,24 @@ export default function VoiceAssistant() {
    */
   const handleMicToggle = async () => {
     if (isListening) {
-      stopListeningAndProcess();
+      // Зөвхөн isListening = false тохируулна (UI товч шинэчлэх).
+      // isProcessing-г энд өөрчлөхгүй — onend дотор боловсруулалт хийгдэнэ.
+      manualStopRef.current = true;
+
+      // Silence timer-г цуцлах
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+
+      setIsListening(false);
+
+      // Recognition-г зогсоох — энэ нь onresult (сүүлийн үр дүн) болон onend-г дуудна
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (_) {}
+      }
       return;
     }
 
@@ -128,6 +164,9 @@ export default function VoiceAssistant() {
 
       currentTranscriptRef.current = (currentTranscriptRef.current + ' ' + newWord).trim();
 
+      // Гараар зогсоосон тохиолдолд silence timer шаардлагагүй
+      if (manualStopRef.current) return;
+
       // Өмнөх silence timer-г цуцлах
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
@@ -135,9 +174,22 @@ export default function VoiceAssistant() {
 
       // 2 секунд чимээгүй болбол автоматаар зогсоож илгээнэ
       silenceTimerRef.current = setTimeout(() => {
-        // Гараар зогсоогоогүй бол автомат зогсоолт хийнэ
         if (!manualStopRef.current) {
-          stopListeningAndProcess();
+          // Автомат зогсоолт: transcript-г авч, recognition-г зогсоо
+          manualStopRef.current = true;
+
+          if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+          }
+
+          setIsListening(false);
+
+          if (recognitionRef.current) {
+            try {
+              recognitionRef.current.stop();
+            } catch (_) {}
+          }
         }
       }, 2000);
     };
@@ -158,15 +210,36 @@ export default function VoiceAssistant() {
       }
       setStatus('Алдаа гарлаа. Дахин оролдоно уу.');
       setIsListening(false);
+      manualStopRef.current = false;
     };
 
     recognition.onend = () => {
-      // Гараар зогсоосон тохиолдолд onend дотор давхар боловсруулахгүй
+      // Silence timer-г цуцлах
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
         silenceTimerRef.current = null;
       }
+
+      // isListening-г false болгох (аль хэдийн false байж болно)
       setIsListening(false);
+
+      // Гараар эсвэл автоматаар зогсоосон тохиолдолд transcript-г боловсруулна.
+      // manualStopRef.current = true байвал бид зогсоолт хийсэн гэсэн үг.
+      // Энд transcript-г авч, API дуудлага хийнэ — isProcessing энд тохируулагдана.
+      if (manualStopRef.current) {
+        manualStopRef.current = false;
+
+        const finalTranscript = currentTranscriptRef.current;
+        currentTranscriptRef.current = '';
+
+        if (finalTranscript) {
+          const historyBeforeCurrentMessage = historyRef.current;
+          updateHistory((prev) => [...prev, { role: 'user', text: finalTranscript }]);
+          sendToBackend(finalTranscript, historyBeforeCurrentMessage);
+        } else {
+          setStatus('Товч дарж ярина уу');
+        }
+      }
     };
 
     recognitionRef.current = recognition;
@@ -223,61 +296,7 @@ export default function VoiceAssistant() {
     reader.readAsDataURL(file);
   };
 
-  /**
-   * Текст болон өмнөх ярилцлагын түүхийг серверт илгээнэ.
-   */
-  const sendToBackend = async (text: string, historyToSend: HistoryItem[], image?: string) => {
-    setStatus('Бодож байна...');
-
-    const cleanHistory = historyToSend.map(({ role, text }) => ({ role, text }));
-
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, history: cleanHistory, ...(image ? { image } : {}) }),
-      });
-
-      if (!res.ok) {
-        throw new Error('Серверээс алдаа буцаалаа.');
-      }
-
-      const data = await res.json();
-
-      if (data.reply) {
-        updateHistory((prev) => [...prev, { role: 'ai', text: data.reply }]);
-      }
-
-      if (data.audioBase64) {
-        setStatus('Хариулж байна...');
-        const audioUrl = `data:audio/mp3;base64,${data.audioBase64}`;
-        const audio = new Audio(audioUrl);
-
-        audio.play().catch((e) => {
-          console.error('Дуу тоглуулахад алдаа гарлаа:', e);
-          setStatus('Дуу тоглуулж чадсангүй.');
-        });
-
-        audio.onended = () => {
-          setStatus('Товч дарж ярина уу');
-        };
-      } else {
-        setStatus('Товч дарж ярина уу');
-      }
-
-    } catch (error: any) {
-      console.error('Холболтын алдаа:', error);
-      setStatus('Серверт алдаа гарлаа. Дахин оролдоно уу.');
-      alert('Алдаа гарлаа: ' + error.message);
-    } finally {
-      // Амжилттай болсон ч, алдаа гарсан ч loading state-үүдийг заавал цэвэрлэнэ
-      setIsProcessingImage(false);
-      setIsListening(false);
-    }
-  };
-
-  const isProcessingVoice = status === 'Бодож байна...' || status === 'Хариулж байна...';
-  const isBusy = isProcessingVoice || isProcessingImage;
+  const isBusy = isProcessing || isProcessingImage;
 
   return (
     <div className="min-h-screen bg-[#f0f4f8] text-[#1a202c] flex flex-col items-center py-10 font-sans">
@@ -414,7 +433,7 @@ export default function VoiceAssistant() {
 
             <button
               onClick={handleMicToggle}
-              disabled={isBusy}
+              disabled={isBusy && !isListening}
               title={isListening ? 'Зогсоох' : 'Дарж ярих'}
               className={`relative z-10 w-28 h-28 rounded-full flex flex-col items-center justify-center text-white shadow-xl transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:hover:scale-100 ${
                 isListening ? 'bg-red-500 scale-110' : 'bg-[#3182ce]'
