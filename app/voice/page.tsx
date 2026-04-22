@@ -162,8 +162,10 @@ export default function VoiceAssistant() {
       return;
     }
 
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
+    // webkitSpeechRecognition — Android Chrome-д заавал шаардлагатай
+    const SpeechRecognitionAPI =
+      (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionAPI) {
       alert(
         'Таны хөтөч дуу таних системийг дэмжихгүй байна.\n\n' +
         'Та Chrome эсвэл Safari хөтөч дээр нээж ашиглана уу.\n' +
@@ -172,9 +174,11 @@ export default function VoiceAssistant() {
       return;
     }
 
-    const recognition = new SpeechRecognition();
+    const recognition = new SpeechRecognitionAPI();
     recognition.lang = 'mn-MN';
-    recognition.continuous = true;
+    // continuous = false — Android Chrome дээр continuous = true тасалдал үүсгэдэг.
+    // Хэрэглэгч гараар зогсоох товч дарна, тиймээс continuous шаардлагагүй.
+    recognition.continuous = false;
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
@@ -191,7 +195,7 @@ export default function VoiceAssistant() {
     };
 
     recognition.onresult = (event: any) => {
-      // isFinal үр дүнгүүдийг нэгтгэж батлагдсан текст үүсгэнэ
+      // --- Ref-д эхлээд бичнэ (React re-render хийхгүй, гар утасны thread-г хамгаална) ---
       let finalPart = '';
       let interimPart = '';
       for (let i = 0; i < event.results.length; i++) {
@@ -204,13 +208,13 @@ export default function VoiceAssistant() {
       finalPart = finalPart.trim();
       interimPart = interimPart.trim();
 
-      // Батлагдсан текстийг ref болон state-д хадгалах
+      // Ref-д хадгалах — энэ нь synchronous бөгөөд re-render үүсгэхгүй
       currentTranscriptRef.current = finalPart;
-      setCurrentTranscript(finalPart);
-
-      // Interim (бодит цагийн) текстийг ref болон state-д хадгалах
       liveTextRef.current = interimPart;
-      setLiveText(interimPart);
+
+      // State update — зөвхөн утга өөрчлөгдсөн үед хийнэ (re-render тоог багасгана)
+      setCurrentTranscript((prev) => (prev !== finalPart ? finalPart : prev));
+      setLiveText((prev) => (prev !== interimPart ? interimPart : prev));
 
       // Гараар зогсоосон тохиолдолд silence timer шаардлагагүй
       if (manualStopRef.current) return;
@@ -243,19 +247,43 @@ export default function VoiceAssistant() {
     };
 
     recognition.onerror = (event: any) => {
-      if (event.error === 'no-speech') return;
-      console.error('Сонсох үеийн алдаа:', event.error);
+      const errCode: string = event.error ?? 'unknown';
+
+      // no-speech бол чимээгүй байна гэсэн үг — алдаа биш
+      if (errCode === 'no-speech') return;
+
+      console.error('Сонсох үеийн алдаа:', errCode);
+
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
         silenceTimerRef.current = null;
       }
-      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+
+      // Алдааны төрлөөс хамааран хэрэглэгчид тодорхой мэдэгдэл харуулна
+      if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
         alert(
           'Микрофоны зөвшөөрөл олгоогүй байна.\n\n' +
           'Та Chrome эсвэл Safari хөтөч дээр нээж, микрофоны зөвшөөрлийг зөвшөөрнө үү.\n' +
-          '(Messenger, Facebook зэрэг апп-ын дотоод хөтөч дэмжихгүй.)'
+          '(Messenger, Facebook зэрэг апп-ын дотоод хөтөч дэмжихгүй.)\n\n' +
+          '[Алдааны код: ' + errCode + ']'
         );
+      } else if (errCode === 'network') {
+        alert(
+          'Сүлжээний алдаа гарлаа. Интернэт холболтоо шалгаад дахин оролдоно уу.\n\n' +
+          '[Алдааны код: network]'
+        );
+      } else if (errCode === 'audio-capture') {
+        alert(
+          'Микрофон олдсонгүй эсвэл ашиглах боломжгүй байна.\n\n' +
+          '[Алдааны код: audio-capture]'
+        );
+      } else if (errCode === 'aborted') {
+        // Хэрэглэгч өөрөө зогсоосон — alert шаардлагагүй
+      } else {
+        // Бусад тодорхойгүй алдааг дэлгэцэнд харуулна (debug-д тусална)
+        alert('Дуу таних алдаа гарлаа.\n\n[Алдааны код: ' + errCode + ']');
       }
+
       setStatus('Алдаа гарлаа. Дахин оролдоно уу.');
       setIsListening(false);
       manualStopRef.current = false;
