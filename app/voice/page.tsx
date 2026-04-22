@@ -13,6 +13,8 @@ interface HistoryItem {
 
 interface UserProfile {
   name: string;
+  gender?: 'Эрэгтэй' | 'Эмэгтэй';
+  age?: number;
 }
 
 // ── localStorage helpers (SSR-safe) ─────────────────────────────────────────
@@ -150,20 +152,36 @@ export default function VoiceAssistant() {
 
   /**
    * API-д илгээхийн өмнө context string үүсгэнэ.
+   * Хэрэглэгчийн нэр, хүйс, нас болон өмнөх ярилцлагын хураангуйг оруулна.
    */
   const buildContextPrefix = (): string => {
     const profile = userProfileRef.current;
     const hist = historyRef.current;
 
-    const namePart = profile
-      ? `Хэрэглэгчийн нэр: ${profile.name}. Тэдэнд хандахдаа "${profile.name} ахаа" эсвэл "${profile.name} ээж" гэж хүндэтгэлтэй хэлнэ үү.`
-      : '';
+    let namePart = '';
+    if (profile) {
+      const honorific =
+        profile.gender === 'Эрэгтэй'
+          ? 'ахаа'
+          : profile.gender === 'Эмэгтэй'
+          ? 'эгчээ'
+          : 'ахаа эсвэл эгчээ';
+
+      namePart = `Хэрэглэгчийн нэр: ${profile.name}. Хүйс: ${profile.gender ?? 'тодорхойгүй'}. Тэдэнд хандахдаа "${profile.name} ${honorific}" гэж хүндэтгэлтэй хэлнэ үү.`;
+
+      if (profile.age !== undefined) {
+        namePart += ` Хэрэглэгчийн нас: ${profile.age} жил.`;
+        if (profile.age >= 70) {
+          namePart += ' Хэрэглэгч маш ахмад настан тул залуу хамаатан шиг маш хүндэтгэлтэй, тусч, тайван байдлаар хариулна уу.';
+        }
+      }
+    }
 
     // Сүүлийн 6 мессежийн товч хураангуй
     const recentLines = hist
       .slice(-6)
       .filter((h) => !h.imagePreview)
-      .map((h) => `${h.role === 'user' ? 'Хэрэглэгч' : 'Батаа'}: ${h.text}`)
+      .map((h) => `${h.role === 'user' ? 'Хэрэглэгч' : 'Итгэл'}: ${h.text}`)
       .join('\n');
 
     const histPart = recentLines
