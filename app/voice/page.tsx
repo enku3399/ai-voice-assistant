@@ -14,13 +14,13 @@ export default function VoiceAssistant() {
   const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   // historyRef нь setHistory-тэй үргэлж синхрон байна.
-  // Closure-ийн асуудлаас зайлсхийж, onresult дотроос тухайн үеийн
-  // history-г найдвартай унших боломжийг олгоно.
   const historyRef = useRef<HistoryItem[]>([]);
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentTranscriptRef = useRef<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Гараар зогсоосон эсэхийг тэмдэглэх — onend дотор давхар илгээхгүйн тулд
+  const manualStopRef = useRef<boolean>(false);
 
   /**
    * History state болон ref-ийг хамтад нь шинэчлэх тусламжийн функц.
@@ -37,7 +37,53 @@ export default function VoiceAssistant() {
     alert('Удахгүй: Энд таны QPay QR код эсвэл дансны дугаар харагдах болно. ❤️');
   };
 
-  const startListening = async () => {
+  /**
+   * Дуу хураалтыг шууд зогсоож, цугларсан transcript-г серверт илгээнэ.
+   * Silence timer-г цуцалж, тэр даруй боловсруулалт эхлүүлнэ.
+   */
+  const stopListeningAndProcess = () => {
+    // Silence timer-г шууд цуцлах
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+
+    const finalTranscript = currentTranscriptRef.current;
+    currentTranscriptRef.current = '';
+
+    // Гараар зогсоосон гэж тэмдэглэх (onend дотор давхар илгээхгүй)
+    manualStopRef.current = true;
+
+    // Recognition-г зогсоох
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (_) {}
+    }
+
+    // UI-г шууд шинэчлэх
+    setIsListening(false);
+
+    if (finalTranscript) {
+      const historyBeforeCurrentMessage = historyRef.current;
+      updateHistory((prev) => [...prev, { role: 'user', text: finalTranscript }]);
+      sendToBackend(finalTranscript, historyBeforeCurrentMessage);
+    } else {
+      setStatus('Товч дарж ярина уу');
+    }
+  };
+
+  /**
+   * Toggle функц: сонсож байвал зогсоо, үгүй бол эхлүүл.
+   */
+  const handleMicToggle = async () => {
+    if (isListening) {
+      stopListeningAndProcess();
+      return;
+    }
+
+    // --- Эхлүүлэх хэсэг ---
+
     // In-app browser болон микрофоны дэмжлэгийг шалгах
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       alert('Та гар утасны үндсэн Chrome эсвэл Safari хөтөч дээр нээнэ үү. Messenger дотор микрофон ажиллахгүй.');
@@ -67,8 +113,9 @@ export default function VoiceAssistant() {
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
 
-    // Transcript цуглуулах хувьсагчийг шинэчлэх
+    // Шинэ session эхлэхэд reset хийх
     currentTranscriptRef.current = '';
+    manualStopRef.current = false;
 
     recognition.onstart = () => {
       setIsListening(true);
@@ -76,43 +123,32 @@ export default function VoiceAssistant() {
     };
 
     recognition.onresult = (event: any) => {
-      // Хамгийн сүүлийн үр дүнг авна
       const lastResult = event.results[event.results.length - 1];
       const newWord: string = lastResult[0].transcript;
 
-      // Цугларсан transcript-д нэмнэ
       currentTranscriptRef.current = (currentTranscriptRef.current + ' ' + newWord).trim();
 
-      // Өмнөх чимээгүй байдлын тоолуурыг цуцална
+      // Өмнөх silence timer-г цуцлах
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
       }
 
-      // 2 секунд чимээгүй болбол recognition зогсоож, серверт илгээнэ
+      // 2 секунд чимээгүй болбол автоматаар зогсоож илгээнэ
       silenceTimerRef.current = setTimeout(() => {
-        recognition.stop();
-
-        const finalTranscript = currentTranscriptRef.current;
-        currentTranscriptRef.current = '';
-
-        if (finalTranscript) {
-          // Тухайн үеийн history-г ref-ээс найдвартай авна
-          const historyBeforeCurrentMessage = historyRef.current;
-
-          // Хэрэглэгчийн шинэ мессежийг UI дээр нэмэх
-          updateHistory((prev) => [...prev, { role: 'user', text: finalTranscript }]);
-
-          // Шинэ transcript болон өмнөх history-г серверт илгээнэ
-          sendToBackend(finalTranscript, historyBeforeCurrentMessage);
+        // Гараар зогсоогоогүй бол автомат зогсоолт хийнэ
+        if (!manualStopRef.current) {
+          stopListeningAndProcess();
         }
       }, 2000);
     };
 
     recognition.onerror = (event: any) => {
-      // 'no-speech' алдааг continuous горимд үл тоомсорлоно
       if (event.error === 'no-speech') return;
       console.error('Сонсох үеийн алдаа:', event.error);
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         alert(
           'Микрофоны зөвшөөрөл олгоогүй байна.\n\n' +
@@ -125,29 +161,37 @@ export default function VoiceAssistant() {
     };
 
     recognition.onend = () => {
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      // Гараар зогсоосон тохиолдолд onend дотор давхар боловсруулахгүй
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
       setIsListening(false);
     };
 
     recognitionRef.current = recognition;
-    recognition.start();
+
+    try {
+      recognition.start();
+    } catch (err: any) {
+      console.error('Recognition эхлүүлэхэд алдаа:', err);
+      setStatus('Алдаа гарлаа. Дахин оролдоно уу.');
+      setIsListening(false);
+    }
   };
 
   /**
    * Камерны товч дарахад файл сонгох / камер нээх функц.
-   * Утсан дээр capture="environment" нь арын камерыг нээнэ.
-   * Компьютер дээр файл сонгох цонх нээнэ.
    */
   const handleCaptureImage = () => {
     if (fileInputRef.current) {
-      fileInputRef.current.value = ''; // Өмнөх сонголтыг цэвэрлэх
+      fileInputRef.current.value = '';
       fileInputRef.current.click();
     }
   };
 
   /**
    * Файл сонгогдсон үед ажиллах функц.
-   * Зургийг Base64 руу хөрвүүлж, серверт илгээнэ.
    */
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -159,18 +203,14 @@ export default function VoiceAssistant() {
     const reader = new FileReader();
     reader.onloadend = () => {
       const dataUrl = reader.result as string;
-      // dataUrl нь "data:image/jpeg;base64,XXXX..." хэлбэртэй байна
-      // Зөвхөн Base64 хэсгийг авна (comma-ийн дараах хэсэг)
       const base64Data = dataUrl.split(',')[1];
 
-      // Зургийн preview-г history-д нэмнэ
       const historyBeforeCurrentMessage = historyRef.current;
       updateHistory((prev) => [
         ...prev,
         { role: 'user', text: '[Зураг илгээв]', imagePreview: dataUrl },
       ]);
 
-      // Серверт зураг болон текст хамт илгээнэ
       sendToBackend('энэ зургийг уншиж өгөөч', historyBeforeCurrentMessage, base64Data);
     };
 
@@ -185,14 +225,10 @@ export default function VoiceAssistant() {
 
   /**
    * Текст болон өмнөх ярилцлагын түүхийг серверт илгээнэ.
-   * @param text - Хэрэглэгчийн шинэ хэлсэн үг
-   * @param historyToSend - Шинэ мессежийг оруулаагүй өмнөх ярилцлагын түүх
-   * @param image - Base64 зургийн өгөгдөл (заавал биш)
    */
   const sendToBackend = async (text: string, historyToSend: HistoryItem[], image?: string) => {
     setStatus('Бодож байна...');
 
-    // History-г серверт илгээхдээ imagePreview талбарыг хасна (зөвхөн UI-д хэрэгтэй)
     const cleanHistory = historyToSend.map(({ role, text }) => ({ role, text }));
 
     try {
@@ -208,12 +244,10 @@ export default function VoiceAssistant() {
 
       const data = await res.json();
 
-      // AI-ийн текстийг дэлгэцэнд нэмэх
       if (data.reply) {
         updateHistory((prev) => [...prev, { role: 'ai', text: data.reply }]);
       }
 
-      // Дууны файлыг тоглуулах
       if (data.audioBase64) {
         setStatus('Хариулж байна...');
         const audioUrl = `data:audio/mp3;base64,${data.audioBase64}`;
@@ -236,19 +270,20 @@ export default function VoiceAssistant() {
       setStatus('Серверт алдаа гарлаа. Дахин оролдоно уу.');
       alert('Алдаа гарлаа: ' + error.message);
     } finally {
+      // Амжилттай болсон ч, алдаа гарсан ч loading state-үүдийг заавал цэвэрлэнэ
       setIsProcessingImage(false);
       setIsListening(false);
     }
   };
 
-  const isBusy = isListening || status === 'Бодож байна...' || status === 'Хариулж байна...' || isProcessingImage;
+  const isProcessingVoice = status === 'Бодож байна...' || status === 'Хариулж байна...';
+  const isBusy = isProcessingVoice || isProcessingImage;
 
   return (
     <div className="min-h-screen bg-[#f0f4f8] text-[#1a202c] flex flex-col items-center py-10 font-sans">
       <div className="w-full max-w-2xl px-4 sm:px-6 mb-6">
         {/* Нэр болон товчнуудын мөр */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Апп-ын нэр */}
           <h1 className="text-xl sm:text-2xl font-bold text-[#2b6cb0] mr-auto whitespace-nowrap">
             🎙️ Дуут Туслагч
           </h1>
@@ -259,7 +294,6 @@ export default function VoiceAssistant() {
             title="Урамшуулах"
             className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-yellow-400 hover:bg-yellow-500 active:scale-95 text-yellow-900 font-semibold text-sm shadow transition-transform"
           >
-            {/* Зүрхний дүрс */}
             <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
               <path
                 fillRule="evenodd"
@@ -275,7 +309,6 @@ export default function VoiceAssistant() {
             href="/"
             className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-gray-200 hover:bg-gray-300 active:scale-95 text-gray-700 font-semibold text-sm shadow transition-transform"
           >
-            {/* Гарах дүрс */}
             <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h6a2 2 0 012 2v1" />
             </svg>
@@ -283,7 +316,6 @@ export default function VoiceAssistant() {
           </a>
         </div>
 
-        {/* Дэд гарчиг — зөвхөн том дэлгэц дээр харагдана */}
         <p className="hidden md:block text-gray-500 text-sm mt-1">Ахмад настнуудад зориулсан дуут туслагч</p>
       </div>
 
@@ -305,7 +337,6 @@ export default function VoiceAssistant() {
               <span className="text-xs opacity-70 block mb-1">
                 {msg.role === 'user' ? 'Та' : 'AI Туслагч'}
               </span>
-              {/* Зургийн preview харуулах */}
               {msg.imagePreview && (
                 <img
                   src={msg.imagePreview}
@@ -319,7 +350,7 @@ export default function VoiceAssistant() {
         )}
       </div>
 
-      {/* Далд файл оруулах input — камер болон файл сонгоход ашиглана */}
+      {/* Далд файл оруулах input */}
       <input
         ref={fileInputRef}
         type="file"
@@ -361,7 +392,6 @@ export default function VoiceAssistant() {
               title="Зураг авах / Файл сонгох"
               className="relative z-10 w-20 h-20 rounded-full flex flex-col items-center justify-center text-white shadow-xl transition-transform transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:hover:scale-100 bg-[#38a169]"
             >
-              {/* Камерны дүрс */}
               <svg className="w-8 h-8 mb-1" fill="currentColor" viewBox="0 0 20 20">
                 <path
                   fillRule="evenodd"
@@ -373,31 +403,44 @@ export default function VoiceAssistant() {
             </button>
           </div>
 
-          {/* Микрофоны товч */}
+          {/* Микрофоны товч — Toggle: Эхлүүлэх / Зогсоох */}
           <div className="relative">
-            {/* Сонсож байх үеийн долгион */}
             {isListening && (
               <>
-                <div className="absolute inset-0 bg-blue-400 rounded-full animate-ping opacity-75"></div>
-                <div className="absolute -inset-4 bg-blue-300 rounded-full animate-pulse opacity-50"></div>
+                <div className="absolute inset-0 bg-red-400 rounded-full animate-ping opacity-75"></div>
+                <div className="absolute -inset-4 bg-red-300 rounded-full animate-pulse opacity-50"></div>
               </>
             )}
 
             <button
-              onClick={startListening}
+              onClick={handleMicToggle}
               disabled={isBusy}
-              className={`relative z-10 w-28 h-28 rounded-full flex flex-col items-center justify-center text-white shadow-xl transition-transform transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:hover:scale-100 ${
-                isListening ? 'bg-red-500' : 'bg-[#3182ce]'
+              title={isListening ? 'Зогсоох' : 'Дарж ярих'}
+              className={`relative z-10 w-28 h-28 rounded-full flex flex-col items-center justify-center text-white shadow-xl transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:hover:scale-100 ${
+                isListening ? 'bg-red-500 scale-110' : 'bg-[#3182ce]'
               }`}
             >
-              <svg className="w-10 h-10 mb-1" fill="currentColor" viewBox="0 0 20 20">
-                <path
-                  fillRule="evenodd"
-                  d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z"
-                  clipRule="evenodd"
-                />
-              </svg>
-              <span className="font-medium">Дарж ярих</span>
+              {isListening ? (
+                /* Зогсоох дүрс (дөрвөлжин) */
+                <>
+                  <svg className="w-10 h-10 mb-1" fill="currentColor" viewBox="0 0 20 20">
+                    <rect x="4" y="4" width="12" height="12" rx="2" />
+                  </svg>
+                  <span className="font-medium text-sm">Зогсоох</span>
+                </>
+              ) : (
+                /* Микрофоны дүрс */
+                <>
+                  <svg className="w-10 h-10 mb-1" fill="currentColor" viewBox="0 0 20 20">
+                    <path
+                      fillRule="evenodd"
+                      d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                  <span className="font-medium">Дарж ярих</span>
+                </>
+              )}
             </button>
           </div>
 
