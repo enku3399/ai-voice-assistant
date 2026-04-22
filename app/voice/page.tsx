@@ -14,13 +14,16 @@ export default function VoiceAssistant() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  // Дуу таних явцад бодит цагийн текстийг хадгалах state (interim + final)
+  // Батлагдсан (isFinal) үр дүнгийн нийлбэр текст
   const [currentTranscript, setCurrentTranscript] = useState<string>('');
+  // Бодит цагийн (interim) текст — дэлгэцэнд харуулах
+  const [liveText, setLiveText] = useState<string>('');
   // historyRef нь setHistory-тэй үргэлж синхрон байна.
   const historyRef = useRef<HistoryItem[]>([]);
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentTranscriptRef = useRef<string>('');
+  const liveTextRef = useRef<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Гараар зогсоосон эсэхийг тэмдэглэх — onend дотор боловсруулалт хийхийн тулд
   const manualStopRef = useRef<boolean>(false);
@@ -91,6 +94,9 @@ export default function VoiceAssistant() {
       // Амжилттай болсон ч, алдаа гарсан ч loading state-үүдийг заавал цэвэрлэнэ
       setIsProcessing(false);
       setIsProcessingImage(false);
+      // API дуудлага дууссаны дараа liveText-г цэвэрлэх
+      setLiveText('');
+      liveTextRef.current = '';
     }
   };
 
@@ -118,20 +124,25 @@ export default function VoiceAssistant() {
 
       // --- Mobile fallback ---
       // Гар утасны хөтөч дээр recognition.stop() дуудсаны дараа onresult болон onend
-      // дуудагдахгүй байж болно. Тиймээс currentTranscriptRef-д хадгалагдсан текстийг
-      // шууд ашиглан API дуудлага хийнэ. onend дотор давхар дуудлага хийхгүйн тулд
+      // дуудагдахгүй байж болно. Тиймээс finalTranscript + liveText-г нэгтгэж
+      // шууд API дуудлага хийнэ. onend дотор давхар дуудлага хийхгүйн тулд
       // manualStopRef-г false болгоно.
-      const fallbackTranscript = currentTranscriptRef.current;
-      if (fallbackTranscript) {
+      const combinedTranscript = [currentTranscriptRef.current, liveTextRef.current]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      if (combinedTranscript) {
         manualStopRef.current = false;
         currentTranscriptRef.current = '';
+        liveTextRef.current = '';
         setCurrentTranscript('');
+        setLiveText('');
 
         const historyBeforeCurrentMessage = historyRef.current;
-        updateHistory((prev) => [...prev, { role: 'user', text: fallbackTranscript }]);
-        sendToBackend(fallbackTranscript, historyBeforeCurrentMessage);
+        updateHistory((prev) => [...prev, { role: 'user', text: combinedTranscript }]);
+        sendToBackend(combinedTranscript, historyBeforeCurrentMessage);
       }
-      // fallbackTranscript хоосон бол onend дотор боловсруулалт хийгдэнэ (desktop)
+      // combinedTranscript хоосон бол onend дотор боловсруулалт хийгдэнэ (desktop)
 
       return;
     }
@@ -169,7 +180,9 @@ export default function VoiceAssistant() {
 
     // Шинэ session эхлэхэд reset хийх
     currentTranscriptRef.current = '';
+    liveTextRef.current = '';
     setCurrentTranscript('');
+    setLiveText('');
     manualStopRef.current = false;
 
     recognition.onstart = () => {
@@ -178,17 +191,26 @@ export default function VoiceAssistant() {
     };
 
     recognition.onresult = (event: any) => {
-      // Бүх үр дүнгийг нэгтгэж бодит цагийн текст үүсгэнэ (interim + final)
-      let fullTranscript = '';
+      // isFinal үр дүнгүүдийг нэгтгэж батлагдсан текст үүсгэнэ
+      let finalPart = '';
+      let interimPart = '';
       for (let i = 0; i < event.results.length; i++) {
-        fullTranscript += event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalPart += event.results[i][0].transcript;
+        } else {
+          interimPart += event.results[i][0].transcript;
+        }
       }
-      fullTranscript = fullTranscript.trim();
+      finalPart = finalPart.trim();
+      interimPart = interimPart.trim();
 
-      // Ref-д хадгалах (onend болон manual stop-д шууд хандах боломжтой)
-      currentTranscriptRef.current = fullTranscript;
-      // State-д хадгалах (mobile fallback-д ашиглах)
-      setCurrentTranscript(fullTranscript);
+      // Батлагдсан текстийг ref болон state-д хадгалах
+      currentTranscriptRef.current = finalPart;
+      setCurrentTranscript(finalPart);
+
+      // Interim (бодит цагийн) текстийг ref болон state-д хадгалах
+      liveTextRef.current = interimPart;
+      setLiveText(interimPart);
 
       // Гараар зогсоосон тохиолдолд silence timer шаардлагагүй
       if (manualStopRef.current) return;
@@ -255,15 +277,22 @@ export default function VoiceAssistant() {
       if (manualStopRef.current) {
         manualStopRef.current = false;
 
-        const finalTranscript = currentTranscriptRef.current;
+        // desktop дээр onend дуудагдах үед final + interim-г нэгтгэнэ
+        const combinedOnEnd = [currentTranscriptRef.current, liveTextRef.current]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+
         // Ref болон state-г цэвэрлэх
         currentTranscriptRef.current = '';
+        liveTextRef.current = '';
         setCurrentTranscript('');
+        setLiveText('');
 
-        if (finalTranscript) {
+        if (combinedOnEnd) {
           const historyBeforeCurrentMessage = historyRef.current;
-          updateHistory((prev) => [...prev, { role: 'user', text: finalTranscript }]);
-          sendToBackend(finalTranscript, historyBeforeCurrentMessage);
+          updateHistory((prev) => [...prev, { role: 'user', text: combinedOnEnd }]);
+          sendToBackend(combinedOnEnd, historyBeforeCurrentMessage);
         } else {
           setStatus('Товч дарж ярина уу');
         }
@@ -421,6 +450,18 @@ export default function VoiceAssistant() {
         >
           {status}
         </div>
+
+        {/* Бодит цагийн транскрипт — сонсож байх үед харуулна */}
+        {isListening && (currentTranscript || liveText) && (
+          <div className="w-full mb-4 px-4 py-3 rounded-2xl bg-white border border-red-200 shadow-sm text-left min-h-[3rem]">
+            {currentTranscript && (
+              <span className="text-gray-800 text-base">{currentTranscript} </span>
+            )}
+            {liveText && (
+              <span className="text-gray-400 italic text-base">{liveText}</span>
+            )}
+          </div>
+        )}
 
         {/* Товчнуудын мөр */}
         <div className="flex items-center gap-6">
