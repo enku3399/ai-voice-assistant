@@ -79,6 +79,13 @@ export default function VoiceAssistant() {
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // iOS audio unlock — дарах үед нэг удаа silent play хийж audio context-г нээнэ
+  const audioUnlockedRef = useRef<boolean>(false);
+  // Одоо тоглож байгаа audio object — memory leak-аас сэргийлэх
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const currentObjectUrlRef = useRef<string | null>(null);
+  // Fallback: iOS-д autoplay хориглогдсон үед харуулах
+  const [pendingAudioBase64, setPendingAudioBase64] = useState<string | null>(null);
 
   // ── On mount: load persisted data ──────────────────────────────────────────
   useEffect(() => {
@@ -115,24 +122,30 @@ export default function VoiceAssistant() {
     });
   };
 
+  // AI-ийн нэрс — хэрэглэгчийн нэр болгон хадгалж болохгүй
+  const AI_NAMES = ['итгэл', 'itgel', 'батаа', 'bataa'];
+
   /**
-   * AI-ийн хариултаас хэрэглэгчийн нэрийг задлах оролдлого.
-   * Хэрэглэгчийн хэлсэн текстийг шууд ашиглана.
+   * Хэрэглэгчийн хэлсэн текстээс нэрийг задлах.
+   * Зөвхөн "намайг X гэдэг" хэлбэрийн тодорхой хэллэгийг хүлээн авна.
+   * AI-ийн нэртэй тохирвол null буцаана.
    */
-  const extractName = (text: string): string => {
-    // "намайг X гэдэг", "X гэдэг", "X нэртэй", эсвэл зүгээр нэг үг
-    const patterns = [
-      /намайг\s+([^\s,\.]+)/i,
-      /([^\s,\.]+)\s+гэдэг/i,
-      /([^\s,\.]+)\s+нэртэй/i,
+  const extractName = (text: string): string | null => {
+    // Зөвхөн "намайг X гэдэг" хэлбэрийг хүлээн авна — тодорхой бус таамаглал хийхгүй
+    const strictPatterns = [
+      /намайг\s+([^\s,\.]+)\s+гэдэг/i,
+      /намайг\s+([^\s,\.]+)\s+гэж\s+дуудна/i,
+      /миний\s+нэр\s+([^\s,\.]+)/i,
     ];
-    for (const p of patterns) {
+    for (const p of strictPatterns) {
       const m = text.match(p);
-      if (m?.[1]) return m[1].trim();
+      if (m?.[1]) {
+        const candidate = m[1].trim();
+        if (AI_NAMES.includes(candidate.toLowerCase())) return null;
+        return candidate;
+      }
     }
-    // Хэрэв тохирохгүй бол эхний үгийг нэр гэж үзнэ
-    const firstWord = text.trim().split(/\s+/)[0];
-    return firstWord || text.trim();
+    return null;
   };
 
   /**
@@ -170,24 +183,127 @@ export default function VoiceAssistant() {
     if (!confirm('Ярилцлагын түүхийг устгаж шинээр эхлэх үү?')) return;
     if (typeof window !== 'undefined') {
       localStorage.removeItem(LS_HISTORY_KEY);
-      // LS_PROFILE_KEY-г огт хүрэхгүй — нэр үүрд хадгалагдана
+      localStorage.removeItem(LS_PROFILE_KEY); // Цэвэр эхлэлт — нэрийг ч устгана
     }
     setHistory([]);
     historyRef.current = [];
+    setUserProfile(null);
+    userProfileRef.current = null;
+    setAwaitingName(true);
+    awaitingNameRef.current = true;
     setStatus('Товч дарж ярина уу');
   };
 
-  // ── Play TTS audio ────────────────────────────────────────────────────────
+  // ── iOS audio unlock ──────────────────────────────────────────────────────
+
+  /**
+   * iOS Safari-д audio autoplay-г нээхийн тулд хэрэглэгчийн gesture дотор
+   * нэг удаа silent play/pause хийнэ. Ингэснээр дараагийн async audio play
+   * амжилттай болно.
+   */
+  const unlockAudioForIOS = () => {
+    if (audioUnlockedRef.current) return;
+    try {
+      const silentAudio = new Audio();
+      silentAudio.src =
+        'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV6urq6urq6urq6urq6urq6urq6urq6urq6v////////////////////////////////8AAAAATGF2YzU4LjU0AAAAAAAAAAAAAAAAJAAAAAAAAAAAASDs90hvAAAAAAAAAAAAAAAAAAAA//MUZAAAAAGkAAAAAAAAA0gAAAAATEFN//MUZAMAAAGkAAAAAAAAA0gAAAAARTMu//MUZAYAAAGkAAAAAAAAA0gAAAAAOTku//MUZAkAAAGkAAAAAAAAA0gAAAAANVVV';
+      silentAudio.volume = 0;
+      const p = silentAudio.play();
+      if (p) p.then(() => silentAudio.pause()).catch(() => {});
+      audioUnlockedRef.current = true;
+    } catch {}
+  };
+
+  // ── Cleanup previous audio ────────────────────────────────────────────────
+
+  const cleanupCurrentAudio = () => {
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current.src = '';
+      currentAudioRef.current = null;
+    }
+    if (currentObjectUrlRef.current) {
+      URL.revokeObjectURL(currentObjectUrlRef.current);
+      currentObjectUrlRef.current = null;
+    }
+  };
+
+  // ── Play TTS audio (iOS-compatible) ──────────────────────────────────────
 
   const playAudio = (audioBase64: string) => {
     setStatus('Хариулж байна...');
-    const audioUrl = `data:audio/mp3;base64,${audioBase64}`;
-    const audio = new Audio(audioUrl);
-    audio.play().catch((e) => {
-      console.error('Дуу тоглуулахад алдаа гарлаа:', e);
+    setPendingAudioBase64(null);
+
+    // Өмнөх audio-г цэвэрлэх
+    cleanupCurrentAudio();
+
+    try {
+      // Base64 → Uint8Array → Blob → ObjectURL (iOS-д memory-efficient)
+      const binary = atob(audioBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: 'audio/mpeg' });
+      const objectUrl = URL.createObjectURL(blob);
+      currentObjectUrlRef.current = objectUrl;
+
+      const audio = new Audio();
+      audio.preload = 'auto';
+      audio.src = objectUrl;
+      currentAudioRef.current = audio;
+
+      audio.onended = () => {
+        setStatus('Товч дарж ярина уу');
+        cleanupCurrentAudio();
+      };
+
+      audio.onerror = (e) => {
+        console.error('Audio error:', e);
+        setStatus('Дуу тоглуулж чадсангүй.');
+        cleanupCurrentAudio();
+      };
+
+      // canplaythrough болмогц тоглуулна — iOS buffering-д тусална
+      const tryPlay = () => {
+        const p = audio.play();
+        if (p) {
+          p.catch((err: any) => {
+            console.error('audio.play() алдаа:', err);
+            const errName: string = err?.name ?? '';
+            if (
+              errName === 'NotAllowedError' ||
+              errName === 'AbortError' ||
+              errName.includes('interact')
+            ) {
+              // iOS autoplay хориглогдсон — fallback товч харуулна
+              setPendingAudioBase64(audioBase64);
+              setStatus('Дуу сонсохын тулд доорх товчийг дарна уу');
+            } else {
+              setStatus('Дуу тоглуулж чадсангүй.');
+            }
+            cleanupCurrentAudio();
+          });
+        }
+      };
+
+      if (audio.readyState >= 3) {
+        tryPlay();
+      } else {
+        audio.addEventListener('canplaythrough', tryPlay, { once: true });
+        audio.load();
+      }
+    } catch (err) {
+      console.error('playAudio exception:', err);
       setStatus('Дуу тоглуулж чадсангүй.');
-    });
-    audio.onended = () => setStatus('Товч дарж ярина уу');
+    }
+  };
+
+  // ── Fallback: manual play triggered by user tap ───────────────────────────
+
+  const handleManualPlay = () => {
+    if (!pendingAudioBase64) return;
+    const b64 = pendingAudioBase64;
+    setPendingAudioBase64(null);
+    playAudio(b64);
   };
 
   // ── Handle AI reply (shared by audio & image paths) ──────────────────────
@@ -313,6 +429,9 @@ export default function VoiceAssistant() {
       }
       return;
     }
+
+    // iOS audio context-г gesture дотор нээх (нэг удаа)
+    unlockAudioForIOS();
 
     // --- Эхлүүлэх ---
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -545,6 +664,16 @@ export default function VoiceAssistant() {
         >
           {status}
         </div>
+
+        {/* iOS fallback: autoplay хориглогдсон үед гарч ирнэ */}
+        {pendingAudioBase64 && (
+          <button
+            onClick={handleManualPlay}
+            className="mb-4 px-6 py-3 rounded-2xl bg-green-500 hover:bg-green-600 active:scale-95 text-white font-bold text-base shadow-lg transition-all animate-pulse"
+          >
+            🔊 Дуу сонсохын тулд энд дарна уу
+          </button>
+        )}
 
         <div className="flex items-center gap-6">
           {/* Image button */}
