@@ -79,7 +79,7 @@ export default function VoiceAssistant() {
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // ── On mount: load persisted data & show greeting if new user ──────────────
+  // ── On mount: load persisted data ──────────────────────────────────────────
   useEffect(() => {
     const savedHistory = loadHistory();
     const savedProfile = loadProfile();
@@ -88,21 +88,13 @@ export default function VoiceAssistant() {
       setHistory(savedHistory);
       historyRef.current = savedHistory;
     }
+    // History always starts empty for new users — no auto-greeting
 
     if (savedProfile) {
       setUserProfile(savedProfile);
       userProfileRef.current = savedProfile;
     } else {
-      // New user — show onboarding greeting
-      const greeting: HistoryItem = {
-        role: 'ai',
-        text: 'Сайн байна уу, намайг Батаа гэдэг. Танилцъя, таныг хэн гэдэг вэ?',
-        timestamp: Date.now(),
-      };
-      const initial = [greeting];
-      setHistory(initial);
-      historyRef.current = initial;
-      saveHistory(initial);
+      // New user — AI will introduce itself naturally on first interaction
       setAwaitingName(true);
       awaitingNameRef.current = true;
     }
@@ -225,9 +217,8 @@ export default function VoiceAssistant() {
       );
 
       const res = await fetch('/api/chat', { method: 'POST', body: formData });
-      if (!res.ok) throw new Error('Серверээс алдаа буцаалаа.');
-
       const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `Серверийн алдаа (${res.status})`);
 
       if (data.reply) {
         // Нэр асуусан үед хариулт ирвэл нэрийг задлах
@@ -279,9 +270,8 @@ export default function VoiceAssistant() {
         }),
       });
 
-      if (!res.ok) throw new Error('Серверээс алдаа буцаалаа.');
-
       const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `Серверийн алдаа (${res.status})`);
       if (data.reply) {
         handleAIReply(data.reply, data.audioBase64);
       } else {

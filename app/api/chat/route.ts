@@ -40,37 +40,66 @@ export async function POST(req: Request) {
 
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-1.5-flash',
       systemInstruction: SYSTEM_INSTRUCTION,
-      // @ts-ignore — Google Search grounding
-      tools: [{ googleSearch: {} }],
+      tools: [{ googleSearch: {} } as any],
     });
 
     let reply: string;
+
+    /**
+     * Хэрэглэгчийн нэр мэдэгдэж байгаа эсэхээс хамааран AI-д зааварчилгаа өгнө.
+     * Нэр мэдэгдэхгүй бол хариулсны эцэст өөрийгөө танилцуулж нэрийг асуух.
+     * Нэр мэдэгдэж байвал зөвхөн нэрийг нь ашиглан хүндэтгэлтэй хариулах.
+     */
+    const buildOnboardingInstruction = (contextPrefix: string): string => {
+      const hasName = contextPrefix.includes('Хэрэглэгчийн нэр:');
+      if (hasName) {
+        return contextPrefix;
+      }
+      // Нэр мэдэгдэхгүй — хариулсны эцэст танилцуулга нэмэх
+      const namePrompt =
+        'ЧУХАЛ ЗААВАРЧИЛГАА: Хэрэглэгчийн нэр одоогоор мэдэгдэхгүй байна. ' +
+        'Хэрэглэгчийн асуултад эхлээд хариул, дараа нь хариулынхаа эцэст байгалийн жамаар ' +
+        '"Дашрамд хэлэхэд, намайг Батаа гэдэг. Танилцъя, таныг хэн гэдэг вэ?" гэж нэмж хэл.';
+      return [contextPrefix, namePrompt].filter(Boolean).join('\n\n');
+    };
+
+    /**
+     * Gemini API history-г зөв форматад хөрвүүлэх.
+     * Эхний элемент 'model' байж болохгүй — тийм бол хасна.
+     */
+    const formatHistory = (history: HistoryItem[]) => {
+      const mapped = history.map((item) => ({
+        role: item.role === 'ai' ? 'model' : 'user',
+        parts: [{ text: item.text }],
+      }));
+      // Gemini API: history нь заавал 'user' мессежээр эхлэх ёстой
+      while (mapped.length > 0 && mapped[0].role === 'model') {
+        mapped.shift();
+      }
+      return mapped;
+    };
 
     // ── A. FormData (аудио бичлэг) ──────────────────────────────────────────
     if (contentType.includes('multipart/form-data')) {
       const formData = await req.formData();
       const audioFile = formData.get('audio') as File | null;
       const historyRaw = formData.get('history') as string | null;
-      const contextPrefix = (formData.get('contextPrefix') as string | null) ?? '';
+      const rawContextPrefix = (formData.get('contextPrefix') as string | null) ?? '';
 
       if (!audioFile) {
         return NextResponse.json({ error: 'Аудио файл олдсонгүй.' }, { status: 400 });
       }
 
       const history: HistoryItem[] = historyRaw ? JSON.parse(historyRaw) : [];
+      const contextPrefix = buildOnboardingInstruction(rawContextPrefix);
 
       const arrayBuffer = await audioFile.arrayBuffer();
       const audioBase64 = Buffer.from(arrayBuffer).toString('base64');
       const audioMimeType = audioFile.type || 'audio/webm';
 
-      const formattedHistory = history.map((item) => ({
-        role: item.role === 'ai' ? 'model' : 'user',
-        parts: [{ text: item.text }],
-      }));
-
-      const chat = model.startChat({ history: formattedHistory });
+      const chat = model.startChat({ history: formatHistory(history) });
 
       // Context prefix + аудио хамтад нь илгээнэ
       const messageParts: any[] = [
@@ -97,7 +126,7 @@ export async function POST(req: Request) {
         text,
         history = [],
         image,
-        contextPrefix = '',
+        contextPrefix: rawContextPrefix = '',
       }: { text?: string; history: HistoryItem[]; image?: string; contextPrefix?: string } = body;
 
       if (!text && !image) {
@@ -107,12 +136,8 @@ export async function POST(req: Request) {
         );
       }
 
-      const formattedHistory = history.map((item) => ({
-        role: item.role === 'ai' ? 'model' : 'user',
-        parts: [{ text: item.text }],
-      }));
-
-      const chat = model.startChat({ history: formattedHistory });
+      const contextPrefix = buildOnboardingInstruction(rawContextPrefix);
+      const chat = model.startChat({ history: formatHistory(history) });
 
       let formattedMessage: any;
       if (image) {
@@ -167,9 +192,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ reply, audioBase64: audioBase64Out });
 
   } catch (error: unknown) {
-    console.error('API алдаа:', error);
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Gemini API Error:', error);
     return NextResponse.json(
-      { error: 'Серверт алдаа гарлаа. Дахин оролдоно уу.' },
+      { error: message || 'Серверт алдаа гарлаа. Дахин оролдоно уу.' },
       { status: 500 }
     );
   }
