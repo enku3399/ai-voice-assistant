@@ -69,6 +69,7 @@ export default function VoiceAssistant() {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   // Whether we are waiting for the user to tell us their name
   const [awaitingName, setAwaitingName] = useState<boolean>(false);
+  const [showDonateModal, setShowDonateModal] = useState<boolean>(false);
 
   const historyRef = useRef<HistoryItem[]>([]);
   const userProfileRef = useRef<UserProfile | null>(null);
@@ -159,20 +160,18 @@ export default function VoiceAssistant() {
     return [namePart, histPart].filter(Boolean).join('\n\n');
   };
 
-  const handleDonate = () => {
-    alert('Удахгүй: Энд таны QPay QR код эсвэл дансны дугаар харагдах болно. ❤️');
-  };
+  const handleDonate = () => setShowDonateModal(true);
 
   /**
    * Чат түүхийг цэвэрлэж шинээр эхлэх.
+   * Хэрэглэгчийн нэр (profile) ХЭЗЭЭ Ч устгахгүй — зөвхөн түүх цэвэрлэнэ.
    */
   const handleClearChat = () => {
     if (!confirm('Ярилцлагын түүхийг устгаж шинээр эхлэх үү?')) return;
-    // localStorage-аас устгах
     if (typeof window !== 'undefined') {
       localStorage.removeItem(LS_HISTORY_KEY);
+      // LS_PROFILE_KEY-г огт хүрэхгүй — нэр үүрд хадгалагдана
     }
-    // State болон ref-г цэвэрлэх
     setHistory([]);
     historyRef.current = [];
     setStatus('Товч дарж ярина уу');
@@ -434,7 +433,7 @@ export default function VoiceAssistant() {
       <div className="w-full max-w-2xl px-4 sm:px-6 mb-6">
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-xl sm:text-2xl font-bold text-[#2b6cb0] mr-auto whitespace-nowrap">
-            🎙️ Батаа Туслагч
+            🤝 Итгэл туслах
           </h1>
 
           {userProfile && (
@@ -504,7 +503,7 @@ export default function VoiceAssistant() {
               <span className="text-xs opacity-70 block mb-1">
                 {msg.role === 'user'
                   ? (userProfile?.name ?? 'Та')
-                  : 'Батаа'}
+                  : 'Итгэл'}
               </span>
               {msg.imagePreview && (
                 <img
@@ -612,6 +611,54 @@ export default function VoiceAssistant() {
           </div>
         </div>
       </div>
+
+      {/* ── Donation Modal ─────────────────────────────────────────────────── */}
+      {showDonateModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
+          onClick={() => setShowDonateModal(false)}
+        >
+          <div
+            className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-7 flex flex-col gap-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Title */}
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">❤️</span>
+              <h2 className="text-xl font-bold text-[#2b6cb0]">Урамшуулах</h2>
+            </div>
+
+            {/* Description */}
+            <p className="text-gray-700 text-base leading-relaxed">
+              Таны сайхан сэтгэлийн хандив дэм энэхүү туслахыг улам сайн болгоход зарцуулагдана.
+            </p>
+
+            {/* Bank info */}
+            <div className="bg-[#f0f4f8] rounded-2xl p-4 flex flex-col gap-2 text-gray-800 text-base">
+              <div className="flex justify-between">
+                <span className="font-semibold text-gray-500">Банк</span>
+                <span className="font-bold">Хаан банк</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="font-semibold text-gray-500">Данс</span>
+                <span className="font-bold tracking-widest">5313783773</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="font-semibold text-gray-500">Нэр</span>
+                <span className="font-bold">Энхбаатар</span>
+              </div>
+            </div>
+
+            {/* Close button */}
+            <button
+              onClick={() => setShowDonateModal(false)}
+              className="w-full py-3 rounded-2xl bg-[#3182ce] hover:bg-[#2b6cb0] active:scale-95 text-white font-bold text-lg shadow transition-all"
+            >
+              Хаах
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
