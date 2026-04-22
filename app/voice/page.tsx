@@ -14,6 +14,8 @@ export default function VoiceAssistant() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  // Дуу таних явцад бодит цагийн текстийг хадгалах state (interim + final)
+  const [currentTranscript, setCurrentTranscript] = useState<string>('');
   // historyRef нь setHistory-тэй үргэлж синхрон байна.
   const historyRef = useRef<HistoryItem[]>([]);
   const recognitionRef = useRef<any>(null);
@@ -97,8 +99,6 @@ export default function VoiceAssistant() {
    */
   const handleMicToggle = async () => {
     if (isListening) {
-      // Зөвхөн isListening = false тохируулна (UI товч шинэчлэх).
-      // isProcessing-г энд өөрчлөхгүй — onend дотор боловсруулалт хийгдэнэ.
       manualStopRef.current = true;
 
       // Silence timer-г цуцлах
@@ -109,12 +109,30 @@ export default function VoiceAssistant() {
 
       setIsListening(false);
 
-      // Recognition-г зогсоох — энэ нь onresult (сүүлийн үр дүн) болон onend-г дуудна
+      // Recognition-г зогсоох
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
         } catch (_) {}
       }
+
+      // --- Mobile fallback ---
+      // Гар утасны хөтөч дээр recognition.stop() дуудсаны дараа onresult болон onend
+      // дуудагдахгүй байж болно. Тиймээс currentTranscriptRef-д хадгалагдсан текстийг
+      // шууд ашиглан API дуудлага хийнэ. onend дотор давхар дуудлага хийхгүйн тулд
+      // manualStopRef-г false болгоно.
+      const fallbackTranscript = currentTranscriptRef.current;
+      if (fallbackTranscript) {
+        manualStopRef.current = false;
+        currentTranscriptRef.current = '';
+        setCurrentTranscript('');
+
+        const historyBeforeCurrentMessage = historyRef.current;
+        updateHistory((prev) => [...prev, { role: 'user', text: fallbackTranscript }]);
+        sendToBackend(fallbackTranscript, historyBeforeCurrentMessage);
+      }
+      // fallbackTranscript хоосон бол onend дотор боловсруулалт хийгдэнэ (desktop)
+
       return;
     }
 
@@ -146,11 +164,12 @@ export default function VoiceAssistant() {
     const recognition = new SpeechRecognition();
     recognition.lang = 'mn-MN';
     recognition.continuous = true;
-    recognition.interimResults = false;
+    recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
     // Шинэ session эхлэхэд reset хийх
     currentTranscriptRef.current = '';
+    setCurrentTranscript('');
     manualStopRef.current = false;
 
     recognition.onstart = () => {
@@ -159,10 +178,17 @@ export default function VoiceAssistant() {
     };
 
     recognition.onresult = (event: any) => {
-      const lastResult = event.results[event.results.length - 1];
-      const newWord: string = lastResult[0].transcript;
+      // Бүх үр дүнгийг нэгтгэж бодит цагийн текст үүсгэнэ (interim + final)
+      let fullTranscript = '';
+      for (let i = 0; i < event.results.length; i++) {
+        fullTranscript += event.results[i][0].transcript;
+      }
+      fullTranscript = fullTranscript.trim();
 
-      currentTranscriptRef.current = (currentTranscriptRef.current + ' ' + newWord).trim();
+      // Ref-д хадгалах (onend болон manual stop-д шууд хандах боломжтой)
+      currentTranscriptRef.current = fullTranscript;
+      // State-д хадгалах (mobile fallback-д ашиглах)
+      setCurrentTranscript(fullTranscript);
 
       // Гараар зогсоосон тохиолдолд silence timer шаардлагагүй
       if (manualStopRef.current) return;
@@ -230,7 +256,9 @@ export default function VoiceAssistant() {
         manualStopRef.current = false;
 
         const finalTranscript = currentTranscriptRef.current;
+        // Ref болон state-г цэвэрлэх
         currentTranscriptRef.current = '';
+        setCurrentTranscript('');
 
         if (finalTranscript) {
           const historyBeforeCurrentMessage = historyRef.current;
