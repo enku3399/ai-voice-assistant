@@ -5,7 +5,7 @@ import { useState, useRef } from 'react';
 interface HistoryItem {
   role: 'user' | 'ai';
   text: string;
-  imagePreview?: string; // Зургийн preview URL (зөвхөн UI-д харуулах)
+  imagePreview?: string;
 }
 
 export default function VoiceAssistant() {
@@ -14,19 +14,12 @@ export default function VoiceAssistant() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  // Батлагдсан (isFinal) үр дүнгийн нийлбэр текст
-  const [currentTranscript, setCurrentTranscript] = useState<string>('');
-  // Бодит цагийн (interim) текст — дэлгэцэнд харуулах
-  const [liveText, setLiveText] = useState<string>('');
-  // historyRef нь setHistory-тэй үргэлж синхрон байна.
+
   const historyRef = useRef<HistoryItem[]>([]);
-  const recognitionRef = useRef<any>(null);
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const currentTranscriptRef = useRef<string>('');
-  const liveTextRef = useRef<string>('');
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Гараар зогсоосон эсэхийг тэмдэглэх — onend дотор боловсруулалт хийхийн тулд
-  const manualStopRef = useRef<boolean>(false);
 
   /**
    * History state болон ref-ийг хамтад нь шинэчлэх тусламжийн функц.
@@ -44,19 +37,23 @@ export default function VoiceAssistant() {
   };
 
   /**
-   * Текст болон өмнөх ярилцлагын түүхийг серверт илгээнэ.
+   * Аудио Blob болон өмнөх ярилцлагын түүхийг серверт илгээнэ.
    */
-  const sendToBackend = async (text: string, historyToSend: HistoryItem[], image?: string) => {
+  const sendAudioToBackend = async (audioBlob: Blob, historyToSend: HistoryItem[]) => {
     setIsProcessing(true);
     setStatus('Бодож байна...');
 
-    const cleanHistory = historyToSend.map(({ role, text }) => ({ role, text }));
-
     try {
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.webm');
+      formData.append(
+        'history',
+        JSON.stringify(historyToSend.map(({ role, text }) => ({ role, text })))
+      );
+
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, history: cleanHistory, ...(image ? { image } : {}) }),
+        body: formData,
       });
 
       if (!res.ok) {
@@ -85,257 +82,165 @@ export default function VoiceAssistant() {
       } else {
         setStatus('Товч дарж ярина уу');
       }
-
     } catch (error: any) {
       console.error('Холболтын алдаа:', error);
       setStatus('Серверт алдаа гарлаа. Дахин оролдоно уу.');
       alert('Алдаа гарлаа: ' + error.message);
     } finally {
-      // Амжилттай болсон ч, алдаа гарсан ч loading state-үүдийг заавал цэвэрлэнэ
       setIsProcessing(false);
-      setIsProcessingImage(false);
-      // API дуудлага дууссаны дараа liveText-г цэвэрлэх
-      setLiveText('');
-      liveTextRef.current = '';
     }
   };
 
   /**
-   * Toggle функц: сонсож байвал зогсоо, үгүй бол эхлүүл.
+   * Зураг болон өмнөх ярилцлагын түүхийг серверт илгээнэ.
+   */
+  const sendImageToBackend = async (base64Image: string, historyToSend: HistoryItem[]) => {
+    setIsProcessing(true);
+    setIsProcessingImage(true);
+    setStatus('Зураг уншиж байна...');
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: 'энэ зургийг уншиж өгөөч',
+          history: historyToSend.map(({ role, text }) => ({ role, text })),
+          image: base64Image,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error('Серверээс алдаа буцаалаа.');
+      }
+
+      const data = await res.json();
+
+      if (data.reply) {
+        updateHistory((prev) => [...prev, { role: 'ai', text: data.reply }]);
+      }
+
+      if (data.audioBase64) {
+        setStatus('Хариулж байна...');
+        const audioUrl = `data:audio/mp3;base64,${data.audioBase64}`;
+        const audio = new Audio(audioUrl);
+
+        audio.play().catch((e) => {
+          console.error('Дуу тоглуулахад алдаа гарлаа:', e);
+          setStatus('Дуу тоглуулж чадсангүй.');
+        });
+
+        audio.onended = () => {
+          setStatus('Товч дарж ярина уу');
+        };
+      } else {
+        setStatus('Товч дарж ярина уу');
+      }
+    } catch (error: any) {
+      console.error('Холболтын алдаа:', error);
+      setStatus('Серверт алдаа гарлаа. Дахин оролдоно уу.');
+      alert('Алдаа гарлаа: ' + error.message);
+    } finally {
+      setIsProcessing(false);
+      setIsProcessingImage(false);
+    }
+  };
+
+  /**
+   * Микрофон toggle: бичлэг эхлүүлэх / зогсоох.
    */
   const handleMicToggle = async () => {
+    // --- Зогсоох ---
     if (isListening) {
-      manualStopRef.current = true;
-
-      // Silence timer-г цуцлах
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-        silenceTimerRef.current = null;
-      }
-
       setIsListening(false);
+      setStatus('Боловсруулж байна...');
 
-      // Recognition-г зогсоох
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch (_) {}
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop(); // onstop дотор API дуудлага хийгдэнэ
       }
-
-      // --- Mobile fallback ---
-      // Гар утасны хөтөч дээр recognition.stop() дуудсаны дараа onresult болон onend
-      // дуудагдахгүй байж болно. Тиймээс finalTranscript + liveText-г нэгтгэж
-      // шууд API дуудлага хийнэ. onend дотор давхар дуудлага хийхгүйн тулд
-      // manualStopRef-г false болгоно.
-      const combinedTranscript = [currentTranscriptRef.current, liveTextRef.current]
-        .filter(Boolean)
-        .join(' ')
-        .trim();
-      if (combinedTranscript) {
-        manualStopRef.current = false;
-        currentTranscriptRef.current = '';
-        liveTextRef.current = '';
-        setCurrentTranscript('');
-        setLiveText('');
-
-        const historyBeforeCurrentMessage = historyRef.current;
-        updateHistory((prev) => [...prev, { role: 'user', text: combinedTranscript }]);
-        sendToBackend(combinedTranscript, historyBeforeCurrentMessage);
-      }
-      // combinedTranscript хоосон бол onend дотор боловсруулалт хийгдэнэ (desktop)
-
       return;
     }
 
-    // --- Эхлүүлэх хэсэг ---
-
-    // In-app browser болон микрофоны дэмжлэгийг шалгах
+    // --- Эхлүүлэх ---
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       alert('Та гар утасны үндсэн Chrome эсвэл Safari хөтөч дээр нээнэ үү. Messenger дотор микрофон ажиллахгүй.');
       return;
     }
 
+    let stream: MediaStream;
     try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err: any) {
-      alert('Та гар утасны үндсэн Chrome эсвэл Safari хөтөч дээр нээнэ үү. Messenger дотор микрофон ажиллахгүй.');
-      return;
-    }
-
-    // webkitSpeechRecognition — Android Chrome-д заавал шаардлагатай
-    const SpeechRecognitionAPI =
-      (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognitionAPI) {
+      const code = err?.name ?? err?.message ?? 'unknown';
       alert(
-        'Таны хөтөч дуу таних системийг дэмжихгүй байна.\n\n' +
-        'Та Chrome эсвэл Safari хөтөч дээр нээж ашиглана уу.\n' +
-        '(Messenger, Facebook зэрэг апп-ын дотоод хөтөч дэмжихгүй.)'
+        'Микрофоны зөвшөөрөл олгоогүй байна.\n\n' +
+        'Та Chrome эсвэл Safari хөтөч дээр нээж, микрофоны зөвшөөрлийг зөвшөөрнө үү.\n\n' +
+        '[Алдааны код: ' + code + ']'
       );
       return;
     }
 
-    const recognition = new SpeechRecognitionAPI();
-    recognition.lang = 'mn-MN';
-    // continuous = false — Android Chrome дээр continuous = true тасалдал үүсгэдэг.
-    // Хэрэглэгч гараар зогсоох товч дарна, тиймээс continuous шаардлагагүй.
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
+    streamRef.current = stream;
+    audioChunksRef.current = [];
 
-    // Шинэ session эхлэхэд reset хийх
-    currentTranscriptRef.current = '';
-    liveTextRef.current = '';
-    setCurrentTranscript('');
-    setLiveText('');
-    manualStopRef.current = false;
+    // Хамгийн өргөн дэмжигдсэн MIME type-г сонгох
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm')
+      ? 'audio/webm'
+      : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')
+      ? 'audio/ogg;codecs=opus'
+      : '';
 
-    recognition.onstart = () => {
-      setIsListening(true);
-      setStatus('Сонсож байна...');
-    };
-
-    recognition.onresult = (event: any) => {
-      // --- Ref-д эхлээд бичнэ (React re-render хийхгүй, гар утасны thread-г хамгаална) ---
-      let finalPart = '';
-      let interimPart = '';
-      for (let i = 0; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          finalPart += event.results[i][0].transcript;
-        } else {
-          interimPart += event.results[i][0].transcript;
-        }
-      }
-      finalPart = finalPart.trim();
-      interimPart = interimPart.trim();
-
-      // Ref-д хадгалах — энэ нь synchronous бөгөөд re-render үүсгэхгүй
-      currentTranscriptRef.current = finalPart;
-      liveTextRef.current = interimPart;
-
-      // State update — зөвхөн утга өөрчлөгдсөн үед хийнэ (re-render тоог багасгана)
-      setCurrentTranscript((prev) => (prev !== finalPart ? finalPart : prev));
-      setLiveText((prev) => (prev !== interimPart ? interimPart : prev));
-
-      // Гараар зогсоосон тохиолдолд silence timer шаардлагагүй
-      if (manualStopRef.current) return;
-
-      // Өмнөх silence timer-г цуцлах
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-      }
-
-      // 2 секунд чимээгүй болбол автоматаар зогсоож илгээнэ
-      silenceTimerRef.current = setTimeout(() => {
-        if (!manualStopRef.current) {
-          // Автомат зогсоолт: transcript-г авч, recognition-г зогсоо
-          manualStopRef.current = true;
-
-          if (silenceTimerRef.current) {
-            clearTimeout(silenceTimerRef.current);
-            silenceTimerRef.current = null;
-          }
-
-          setIsListening(false);
-
-          if (recognitionRef.current) {
-            try {
-              recognitionRef.current.stop();
-            } catch (_) {}
-          }
-        }
-      }, 2000);
-    };
-
-    recognition.onerror = (event: any) => {
-      const errCode: string = event.error ?? 'unknown';
-
-      // no-speech бол чимээгүй байна гэсэн үг — алдаа биш
-      if (errCode === 'no-speech') return;
-
-      console.error('Сонсох үеийн алдаа:', errCode);
-
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-        silenceTimerRef.current = null;
-      }
-
-      // Алдааны төрлөөс хамааран хэрэглэгчид тодорхой мэдэгдэл харуулна
-      if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
-        alert(
-          'Микрофоны зөвшөөрөл олгоогүй байна.\n\n' +
-          'Та Chrome эсвэл Safari хөтөч дээр нээж, микрофоны зөвшөөрлийг зөвшөөрнө үү.\n' +
-          '(Messenger, Facebook зэрэг апп-ын дотоод хөтөч дэмжихгүй.)\n\n' +
-          '[Алдааны код: ' + errCode + ']'
-        );
-      } else if (errCode === 'network') {
-        alert(
-          'Сүлжээний алдаа гарлаа. Интернэт холболтоо шалгаад дахин оролдоно уу.\n\n' +
-          '[Алдааны код: network]'
-        );
-      } else if (errCode === 'audio-capture') {
-        alert(
-          'Микрофон олдсонгүй эсвэл ашиглах боломжгүй байна.\n\n' +
-          '[Алдааны код: audio-capture]'
-        );
-      } else if (errCode === 'aborted') {
-        // Хэрэглэгч өөрөө зогсоосон — alert шаардлагагүй
-      } else {
-        // Бусад тодорхойгүй алдааг дэлгэцэнд харуулна (debug-д тусална)
-        alert('Дуу таних алдаа гарлаа.\n\n[Алдааны код: ' + errCode + ']');
-      }
-
-      setStatus('Алдаа гарлаа. Дахин оролдоно уу.');
-      setIsListening(false);
-      manualStopRef.current = false;
-    };
-
-    recognition.onend = () => {
-      // Silence timer-г цуцлах
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-        silenceTimerRef.current = null;
-      }
-
-      // isListening-г false болгох (аль хэдийн false байж болно)
-      setIsListening(false);
-
-      // Гараар эсвэл автоматаар зогсоосон тохиолдолд transcript-г боловсруулна.
-      // manualStopRef.current = true байвал бид зогсоолт хийсэн гэсэн үг.
-      // Энд transcript-г авч, API дуудлага хийнэ — isProcessing энд тохируулагдана.
-      if (manualStopRef.current) {
-        manualStopRef.current = false;
-
-        // desktop дээр onend дуудагдах үед final + interim-г нэгтгэнэ
-        const combinedOnEnd = [currentTranscriptRef.current, liveTextRef.current]
-          .filter(Boolean)
-          .join(' ')
-          .trim();
-
-        // Ref болон state-г цэвэрлэх
-        currentTranscriptRef.current = '';
-        liveTextRef.current = '';
-        setCurrentTranscript('');
-        setLiveText('');
-
-        if (combinedOnEnd) {
-          const historyBeforeCurrentMessage = historyRef.current;
-          updateHistory((prev) => [...prev, { role: 'user', text: combinedOnEnd }]);
-          sendToBackend(combinedOnEnd, historyBeforeCurrentMessage);
-        } else {
-          setStatus('Товч дарж ярина уу');
-        }
-      }
-    };
-
-    recognitionRef.current = recognition;
-
+    let recorder: MediaRecorder;
     try {
-      recognition.start();
+      recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     } catch (err: any) {
-      console.error('Recognition эхлүүлэхэд алдаа:', err);
-      setStatus('Алдаа гарлаа. Дахин оролдоно уу.');
-      setIsListening(false);
+      alert('MediaRecorder үүсгэхэд алдаа гарлаа: ' + (err?.message ?? err));
+      stream.getTracks().forEach((t) => t.stop());
+      return;
     }
+
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        audioChunksRef.current.push(e.data);
+      }
+    };
+
+    recorder.onstop = async () => {
+      // Stream-г чөлөөлөх
+      stream.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+
+      const chunks = audioChunksRef.current;
+      audioChunksRef.current = [];
+
+      if (chunks.length === 0) {
+        setStatus('Товч дарж ярина уу');
+        return;
+      }
+
+      const audioBlob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+
+      const historyBeforeCurrentMessage = historyRef.current;
+      // Хэрэглэгчийн мессежийг history-д нэмэх (placeholder)
+      updateHistory((prev) => [...prev, { role: 'user', text: '🎤 Дуу бичлэг' }]);
+
+      await sendAudioToBackend(audioBlob, historyBeforeCurrentMessage);
+    };
+
+    recorder.onerror = (e: any) => {
+      console.error('MediaRecorder алдаа:', e);
+      setIsListening(false);
+      setStatus('Бичлэгт алдаа гарлаа. Дахин оролдоно уу.');
+      stream.getTracks().forEach((t) => t.stop());
+    };
+
+    mediaRecorderRef.current = recorder;
+    recorder.start(250); // 250ms тутамд chunk авна
+
+    setIsListening(true);
+    setStatus('Сонсож байна...');
   };
 
   /**
@@ -355,9 +260,6 @@ export default function VoiceAssistant() {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    setIsProcessingImage(true);
-    setStatus('Зураг уншиж байна...');
-
     const reader = new FileReader();
     reader.onloadend = () => {
       const dataUrl = reader.result as string;
@@ -369,13 +271,12 @@ export default function VoiceAssistant() {
         { role: 'user', text: '[Зураг илгээв]', imagePreview: dataUrl },
       ]);
 
-      sendToBackend('энэ зургийг уншиж өгөөч', historyBeforeCurrentMessage, base64Data);
+      sendImageToBackend(base64Data, historyBeforeCurrentMessage);
     };
 
     reader.onerror = () => {
       console.error('Зураг уншихад алдаа гарлаа.');
       setStatus('Зураг уншихад алдаа гарлаа.');
-      setIsProcessingImage(false);
     };
 
     reader.readAsDataURL(file);
@@ -471,25 +372,13 @@ export default function VoiceAssistant() {
               ? 'text-red-500 animate-pulse'
               : status === 'Хариулж байна...'
               ? 'text-green-600'
-              : status === 'Зураг уншиж байна...' || status === 'Бодож байна...'
+              : status === 'Зураг уншиж байна...' || status === 'Бодож байна...' || status === 'Боловсруулж байна...'
               ? 'text-yellow-600 animate-pulse'
               : 'text-gray-600'
           }`}
         >
           {status}
         </div>
-
-        {/* Бодит цагийн транскрипт — сонсож байх үед харуулна */}
-        {isListening && (currentTranscript || liveText) && (
-          <div className="w-full mb-4 px-4 py-3 rounded-2xl bg-white border border-red-200 shadow-sm text-left min-h-[3rem]">
-            {currentTranscript && (
-              <span className="text-gray-800 text-base">{currentTranscript} </span>
-            )}
-            {liveText && (
-              <span className="text-gray-400 italic text-base">{liveText}</span>
-            )}
-          </div>
-        )}
 
         {/* Товчнуудын мөр */}
         <div className="flex items-center gap-6">
@@ -504,7 +393,7 @@ export default function VoiceAssistant() {
             )}
             <button
               onClick={handleCaptureImage}
-              disabled={isBusy}
+              disabled={isBusy || isListening}
               title="Зураг авах / Файл сонгох"
               className="relative z-10 w-20 h-20 rounded-full flex flex-col items-center justify-center text-white shadow-xl transition-transform transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:hover:scale-100 bg-[#38a169]"
             >
@@ -537,7 +426,6 @@ export default function VoiceAssistant() {
               }`}
             >
               {isListening ? (
-                /* Зогсоох дүрс (дөрвөлжин) */
                 <>
                   <svg className="w-10 h-10 mb-1" fill="currentColor" viewBox="0 0 20 20">
                     <rect x="4" y="4" width="12" height="12" rx="2" />
@@ -545,7 +433,6 @@ export default function VoiceAssistant() {
                   <span className="font-medium text-sm">Зогсоох</span>
                 </>
               ) : (
-                /* Микрофоны дүрс */
                 <>
                   <svg className="w-10 h-10 mb-1" fill="currentColor" viewBox="0 0 20 20">
                     <path
