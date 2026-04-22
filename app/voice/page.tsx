@@ -163,6 +163,21 @@ export default function VoiceAssistant() {
     alert('Удахгүй: Энд таны QPay QR код эсвэл дансны дугаар харагдах болно. ❤️');
   };
 
+  /**
+   * Чат түүхийг цэвэрлэж шинээр эхлэх.
+   */
+  const handleClearChat = () => {
+    if (!confirm('Ярилцлагын түүхийг устгаж шинээр эхлэх үү?')) return;
+    // localStorage-аас устгах
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(LS_HISTORY_KEY);
+    }
+    // State болон ref-г цэвэрлэх
+    setHistory([]);
+    historyRef.current = [];
+    setStatus('Товч дарж ярина уу');
+  };
+
   // ── Play TTS audio ────────────────────────────────────────────────────────
 
   const playAudio = (audioBase64: string) => {
@@ -427,6 +442,19 @@ export default function VoiceAssistant() {
               👤 {userProfile.name}
             </span>
           )}
+
+          {/* Шинээр эхлэх товч */}
+          <button
+            onClick={handleClearChat}
+            disabled={isBusy || isListening}
+            title="Ярилцлагын түүхийг цэвэрлэх"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-gray-100 hover:bg-red-100 active:scale-95 text-gray-500 hover:text-red-600 font-semibold text-sm shadow transition-all disabled:opacity-40"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+            Шинээр эхлэх
+          </button>
 
           <button
             onClick={handleDonate}
