@@ -1,84 +1,248 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
+
+// ── Types ────────────────────────────────────────────────────────────────────
 
 interface HistoryItem {
   role: 'user' | 'ai';
   text: string;
+  timestamp: number;
   imagePreview?: string;
 }
+
+interface UserProfile {
+  name: string;
+}
+
+// ── localStorage helpers (SSR-safe) ─────────────────────────────────────────
+
+const LS_HISTORY_KEY = 'bataa_history';
+const LS_PROFILE_KEY = 'bataa_profile';
+
+function loadHistory(): HistoryItem[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(LS_HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(items: HistoryItem[]) {
+  if (typeof window === 'undefined') return;
+  try {
+    // Сүүлийн 50 мессежийг хадгална (хэт урт болохоос сэргийлэх)
+    localStorage.setItem(LS_HISTORY_KEY, JSON.stringify(items.slice(-50)));
+  } catch {}
+}
+
+function loadProfile(): UserProfile | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LS_PROFILE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveProfile(profile: UserProfile) {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(LS_PROFILE_KEY, JSON.stringify(profile));
+  } catch {}
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
 
 export default function VoiceAssistant() {
   const [status, setStatus] = useState<string>('Товч дарж ярина уу');
   const [isListening, setIsListening] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
+
+  // Persistent chat history (loaded from localStorage on mount)
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  // User profile (name)
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  // Whether we are waiting for the user to tell us their name
+  const [awaitingName, setAwaitingName] = useState<boolean>(false);
 
   const historyRef = useRef<HistoryItem[]>([]);
+  const userProfileRef = useRef<UserProfile | null>(null);
+  const awaitingNameRef = useRef<boolean>(false);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ── On mount: load persisted data & show greeting if new user ──────────────
+  useEffect(() => {
+    const savedHistory = loadHistory();
+    const savedProfile = loadProfile();
+
+    if (savedHistory.length > 0) {
+      setHistory(savedHistory);
+      historyRef.current = savedHistory;
+    }
+
+    if (savedProfile) {
+      setUserProfile(savedProfile);
+      userProfileRef.current = savedProfile;
+    } else {
+      // New user — show onboarding greeting
+      const greeting: HistoryItem = {
+        role: 'ai',
+        text: 'Сайн байна уу, намайг Батаа гэдэг. Танилцъя, таныг хэн гэдэг вэ?',
+        timestamp: Date.now(),
+      };
+      const initial = [greeting];
+      setHistory(initial);
+      historyRef.current = initial;
+      saveHistory(initial);
+      setAwaitingName(true);
+      awaitingNameRef.current = true;
+    }
+  }, []);
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
   /**
-   * History state болон ref-ийг хамтад нь шинэчлэх тусламжийн функц.
+   * History state, ref, localStorage-г хамтад нь шинэчлэх.
    */
   const updateHistory = (updater: (prev: HistoryItem[]) => HistoryItem[]) => {
     setHistory((prev) => {
       const next = updater(prev);
       historyRef.current = next;
+      saveHistory(next);
       return next;
     });
+  };
+
+  /**
+   * AI-ийн хариултаас хэрэглэгчийн нэрийг задлах оролдлого.
+   * Хэрэглэгчийн хэлсэн текстийг шууд ашиглана.
+   */
+  const extractName = (text: string): string => {
+    // "намайг X гэдэг", "X гэдэг", "X нэртэй", эсвэл зүгээр нэг үг
+    const patterns = [
+      /намайг\s+([^\s,\.]+)/i,
+      /([^\s,\.]+)\s+гэдэг/i,
+      /([^\s,\.]+)\s+нэртэй/i,
+    ];
+    for (const p of patterns) {
+      const m = text.match(p);
+      if (m?.[1]) return m[1].trim();
+    }
+    // Хэрэв тохирохгүй бол эхний үгийг нэр гэж үзнэ
+    const firstWord = text.trim().split(/\s+/)[0];
+    return firstWord || text.trim();
+  };
+
+  /**
+   * API-д илгээхийн өмнө context string үүсгэнэ.
+   */
+  const buildContextPrefix = (): string => {
+    const profile = userProfileRef.current;
+    const hist = historyRef.current;
+
+    const namePart = profile
+      ? `Хэрэглэгчийн нэр: ${profile.name}. Тэдэнд хандахдаа "${profile.name} ахаа" эсвэл "${profile.name} ээж" гэж хүндэтгэлтэй хэлнэ үү.`
+      : '';
+
+    // Сүүлийн 6 мессежийн товч хураангуй
+    const recentLines = hist
+      .slice(-6)
+      .filter((h) => !h.imagePreview)
+      .map((h) => `${h.role === 'user' ? 'Хэрэглэгч' : 'Батаа'}: ${h.text}`)
+      .join('\n');
+
+    const histPart = recentLines
+      ? `Өмнөх ярилцлагын хураангуй:\n${recentLines}`
+      : '';
+
+    return [namePart, histPart].filter(Boolean).join('\n\n');
   };
 
   const handleDonate = () => {
     alert('Удахгүй: Энд таны QPay QR код эсвэл дансны дугаар харагдах болно. ❤️');
   };
 
-  /**
-   * Аудио Blob болон өмнөх ярилцлагын түүхийг серверт илгээнэ.
-   */
-  const sendAudioToBackend = async (audioBlob: Blob, historyToSend: HistoryItem[]) => {
+  // ── Play TTS audio ────────────────────────────────────────────────────────
+
+  const playAudio = (audioBase64: string) => {
+    setStatus('Хариулж байна...');
+    const audioUrl = `data:audio/mp3;base64,${audioBase64}`;
+    const audio = new Audio(audioUrl);
+    audio.play().catch((e) => {
+      console.error('Дуу тоглуулахад алдаа гарлаа:', e);
+      setStatus('Дуу тоглуулж чадсангүй.');
+    });
+    audio.onended = () => setStatus('Товч дарж ярина уу');
+  };
+
+  // ── Handle AI reply (shared by audio & image paths) ──────────────────────
+
+  const handleAIReply = (reply: string, audioBase64?: string) => {
+    const aiItem: HistoryItem = { role: 'ai', text: reply, timestamp: Date.now() };
+    updateHistory((prev) => [...prev, aiItem]);
+
+    if (audioBase64) {
+      playAudio(audioBase64);
+    } else {
+      setStatus('Товч дарж ярина уу');
+    }
+  };
+
+  // ── Send audio to backend ─────────────────────────────────────────────────
+
+  const sendAudioToBackend = async (audioBlob: Blob, userLabel: string) => {
     setIsProcessing(true);
     setStatus('Бодож байна...');
+
+    // User message-г history-д нэмэх
+    const userItem: HistoryItem = { role: 'user', text: userLabel, timestamp: Date.now() };
+    updateHistory((prev) => [...prev, userItem]);
+
+    // Context prefix-г history-д оруулахгүйгээр зөвхөн API-д дамжуулна
+    const contextPrefix = buildContextPrefix();
 
     try {
       const formData = new FormData();
       formData.append('audio', audioBlob, 'recording.webm');
+      formData.append('contextPrefix', contextPrefix);
       formData.append(
         'history',
-        JSON.stringify(historyToSend.map(({ role, text }) => ({ role, text })))
+        JSON.stringify(
+          historyRef.current
+            .filter((h) => !h.imagePreview)
+            .slice(-10)
+            .map(({ role, text }) => ({ role, text }))
+        )
       );
 
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!res.ok) {
-        throw new Error('Серверээс алдаа буцаалаа.');
-      }
+      const res = await fetch('/api/chat', { method: 'POST', body: formData });
+      if (!res.ok) throw new Error('Серверээс алдаа буцаалаа.');
 
       const data = await res.json();
 
       if (data.reply) {
-        updateHistory((prev) => [...prev, { role: 'ai', text: data.reply }]);
-      }
-
-      if (data.audioBase64) {
-        setStatus('Хариулж байна...');
-        const audioUrl = `data:audio/mp3;base64,${data.audioBase64}`;
-        const audio = new Audio(audioUrl);
-
-        audio.play().catch((e) => {
-          console.error('Дуу тоглуулахад алдаа гарлаа:', e);
-          setStatus('Дуу тоглуулж чадсангүй.');
-        });
-
-        audio.onended = () => {
-          setStatus('Товч дарж ярина уу');
-        };
+        // Нэр асуусан үед хариулт ирвэл нэрийг задлах
+        if (awaitingNameRef.current) {
+          const name = extractName(data.reply);
+          if (name) {
+            const profile: UserProfile = { name };
+            setUserProfile(profile);
+            userProfileRef.current = profile;
+            saveProfile(profile);
+          }
+          setAwaitingName(false);
+          awaitingNameRef.current = false;
+        }
+        handleAIReply(data.reply, data.audioBase64);
       } else {
         setStatus('Товч дарж ярина уу');
       }
@@ -91,13 +255,14 @@ export default function VoiceAssistant() {
     }
   };
 
-  /**
-   * Зураг болон өмнөх ярилцлагын түүхийг серверт илгээнэ.
-   */
-  const sendImageToBackend = async (base64Image: string, historyToSend: HistoryItem[]) => {
+  // ── Send image to backend ─────────────────────────────────────────────────
+
+  const sendImageToBackend = async (base64Image: string) => {
     setIsProcessing(true);
     setIsProcessingImage(true);
     setStatus('Зураг уншиж байна...');
+
+    const contextPrefix = buildContextPrefix();
 
     try {
       const res = await fetch('/api/chat', {
@@ -105,34 +270,20 @@ export default function VoiceAssistant() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: 'энэ зургийг уншиж өгөөч',
-          history: historyToSend.map(({ role, text }) => ({ role, text })),
+          contextPrefix,
+          history: historyRef.current
+            .filter((h) => !h.imagePreview)
+            .slice(-10)
+            .map(({ role, text }) => ({ role, text })),
           image: base64Image,
         }),
       });
 
-      if (!res.ok) {
-        throw new Error('Серверээс алдаа буцаалаа.');
-      }
+      if (!res.ok) throw new Error('Серверээс алдаа буцаалаа.');
 
       const data = await res.json();
-
       if (data.reply) {
-        updateHistory((prev) => [...prev, { role: 'ai', text: data.reply }]);
-      }
-
-      if (data.audioBase64) {
-        setStatus('Хариулж байна...');
-        const audioUrl = `data:audio/mp3;base64,${data.audioBase64}`;
-        const audio = new Audio(audioUrl);
-
-        audio.play().catch((e) => {
-          console.error('Дуу тоглуулахад алдаа гарлаа:', e);
-          setStatus('Дуу тоглуулж чадсангүй.');
-        });
-
-        audio.onended = () => {
-          setStatus('Товч дарж ярина уу');
-        };
+        handleAIReply(data.reply, data.audioBase64);
       } else {
         setStatus('Товч дарж ярина уу');
       }
@@ -146,24 +297,22 @@ export default function VoiceAssistant() {
     }
   };
 
-  /**
-   * Микрофон toggle: бичлэг эхлүүлэх / зогсоох.
-   */
+  // ── Mic toggle ────────────────────────────────────────────────────────────
+
   const handleMicToggle = async () => {
     // --- Зогсоох ---
     if (isListening) {
       setIsListening(false);
       setStatus('Боловсруулж байна...');
-
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop(); // onstop дотор API дуудлага хийгдэнэ
+        mediaRecorderRef.current.stop();
       }
       return;
     }
 
     // --- Эхлүүлэх ---
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('Та гар утасны үндсэн Chrome эсвэл Safari хөтөч дээр нээнэ үү. Messenger дотор микрофон ажиллахгүй.');
+      alert('Та гар утасны үндсэн Chrome эсвэл Safari хөтөч дээр нээнэ үү.');
       return;
     }
 
@@ -183,7 +332,6 @@ export default function VoiceAssistant() {
     streamRef.current = stream;
     audioChunksRef.current = [];
 
-    // Хамгийн өргөн дэмжигдсэн MIME type-г сонгох
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
       : MediaRecorder.isTypeSupported('audio/webm')
@@ -202,13 +350,10 @@ export default function VoiceAssistant() {
     }
 
     recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) {
-        audioChunksRef.current.push(e.data);
-      }
+      if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
     };
 
     recorder.onstop = async () => {
-      // Stream-г чөлөөлөх
       stream.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
 
@@ -222,11 +367,11 @@ export default function VoiceAssistant() {
 
       const audioBlob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
 
-      const historyBeforeCurrentMessage = historyRef.current;
-      // Хэрэглэгчийн мессежийг history-д нэмэх (placeholder)
-      updateHistory((prev) => [...prev, { role: 'user', text: '🎤 Дуу бичлэг' }]);
+      // Хэрэглэгчийн нэрийг label болгон ашиглах
+      const userName = userProfileRef.current?.name;
+      const userLabel = userName ? `🎤 ${userName}` : '🎤 Дуу бичлэг';
 
-      await sendAudioToBackend(audioBlob, historyBeforeCurrentMessage);
+      await sendAudioToBackend(audioBlob, userLabel);
     };
 
     recorder.onerror = (e: any) => {
@@ -237,15 +382,14 @@ export default function VoiceAssistant() {
     };
 
     mediaRecorderRef.current = recorder;
-    recorder.start(250); // 250ms тутамд chunk авна
+    recorder.start(250);
 
     setIsListening(true);
     setStatus('Сонсож байна...');
   };
 
-  /**
-   * Камерны товч дарахад файл сонгох / камер нээх функц.
-   */
+  // ── Image capture ─────────────────────────────────────────────────────────
+
   const handleCaptureImage = () => {
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -253,9 +397,6 @@ export default function VoiceAssistant() {
     }
   };
 
-  /**
-   * Файл сонгогдсон үед ажиллах функц.
-   */
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -265,35 +406,38 @@ export default function VoiceAssistant() {
       const dataUrl = reader.result as string;
       const base64Data = dataUrl.split(',')[1];
 
-      const historyBeforeCurrentMessage = historyRef.current;
       updateHistory((prev) => [
         ...prev,
-        { role: 'user', text: '[Зураг илгээв]', imagePreview: dataUrl },
+        { role: 'user', text: '[Зураг илгээв]', timestamp: Date.now(), imagePreview: dataUrl },
       ]);
 
-      sendImageToBackend(base64Data, historyBeforeCurrentMessage);
+      sendImageToBackend(base64Data);
     };
-
     reader.onerror = () => {
       console.error('Зураг уншихад алдаа гарлаа.');
       setStatus('Зураг уншихад алдаа гарлаа.');
     };
-
     reader.readAsDataURL(file);
   };
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   const isBusy = isProcessing || isProcessingImage;
 
   return (
     <div className="min-h-screen bg-[#f0f4f8] text-[#1a202c] flex flex-col items-center py-10 font-sans">
       <div className="w-full max-w-2xl px-4 sm:px-6 mb-6">
-        {/* Нэр болон товчнуудын мөр */}
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-xl sm:text-2xl font-bold text-[#2b6cb0] mr-auto whitespace-nowrap">
-            🎙️ Дуут Туслагч
+            🎙️ Батаа Туслагч
           </h1>
 
-          {/* Урамшуулах товч */}
+          {userProfile && (
+            <span className="text-sm text-gray-500 font-medium">
+              👤 {userProfile.name}
+            </span>
+          )}
+
           <button
             onClick={handleDonate}
             title="Урамшуулах"
@@ -309,7 +453,6 @@ export default function VoiceAssistant() {
             Урамшуулах
           </button>
 
-          {/* Гарах товч */}
           <a
             href="/"
             className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-gray-200 hover:bg-gray-300 active:scale-95 text-gray-700 font-semibold text-sm shadow transition-transform"
@@ -324,6 +467,7 @@ export default function VoiceAssistant() {
         <p className="hidden md:block text-gray-500 text-sm mt-1">Ахмад настнуудад зориулсан дуут туслагч</p>
       </div>
 
+      {/* Chat history */}
       <div className="flex-1 w-full max-w-2xl px-6 overflow-y-auto mb-8 flex flex-col gap-4">
         {history.length === 0 ? (
           <div className="text-center text-gray-400 mt-20">
@@ -340,7 +484,9 @@ export default function VoiceAssistant() {
               }`}
             >
               <span className="text-xs opacity-70 block mb-1">
-                {msg.role === 'user' ? 'Та' : 'AI Туслагч'}
+                {msg.role === 'user'
+                  ? (userProfile?.name ?? 'Та')
+                  : 'Батаа'}
               </span>
               {msg.imagePreview && (
                 <img
@@ -355,7 +501,7 @@ export default function VoiceAssistant() {
         )}
       </div>
 
-      {/* Далд файл оруулах input */}
+      {/* Hidden file input */}
       <input
         ref={fileInputRef}
         type="file"
@@ -365,6 +511,7 @@ export default function VoiceAssistant() {
         onChange={handleFileChange}
       />
 
+      {/* Controls */}
       <div className="w-full max-w-2xl px-6 flex flex-col items-center pb-10">
         <div
           className={`text-xl mb-6 font-medium transition-colors ${
@@ -372,7 +519,9 @@ export default function VoiceAssistant() {
               ? 'text-red-500 animate-pulse'
               : status === 'Хариулж байна...'
               ? 'text-green-600'
-              : status === 'Зураг уншиж байна...' || status === 'Бодож байна...' || status === 'Боловсруулж байна...'
+              : status === 'Зураг уншиж байна...' ||
+                status === 'Бодож байна...' ||
+                status === 'Боловсруулж байна...'
               ? 'text-yellow-600 animate-pulse'
               : 'text-gray-600'
           }`}
@@ -380,15 +529,13 @@ export default function VoiceAssistant() {
           {status}
         </div>
 
-        {/* Товчнуудын мөр */}
         <div className="flex items-center gap-6">
-
-          {/* Зураг авах товч */}
+          {/* Image button */}
           <div className="relative">
             {isProcessingImage && (
               <>
-                <div className="absolute inset-0 bg-green-400 rounded-full animate-ping opacity-75"></div>
-                <div className="absolute -inset-3 bg-green-300 rounded-full animate-pulse opacity-50"></div>
+                <div className="absolute inset-0 bg-green-400 rounded-full animate-ping opacity-75" />
+                <div className="absolute -inset-3 bg-green-300 rounded-full animate-pulse opacity-50" />
               </>
             )}
             <button
@@ -408,15 +555,14 @@ export default function VoiceAssistant() {
             </button>
           </div>
 
-          {/* Микрофоны товч — Toggle: Эхлүүлэх / Зогсоох */}
+          {/* Mic button */}
           <div className="relative">
             {isListening && (
               <>
-                <div className="absolute inset-0 bg-red-400 rounded-full animate-ping opacity-75"></div>
-                <div className="absolute -inset-4 bg-red-300 rounded-full animate-pulse opacity-50"></div>
+                <div className="absolute inset-0 bg-red-400 rounded-full animate-ping opacity-75" />
+                <div className="absolute -inset-4 bg-red-300 rounded-full animate-pulse opacity-50" />
               </>
             )}
-
             <button
               onClick={handleMicToggle}
               disabled={isBusy && !isListening}
@@ -446,7 +592,6 @@ export default function VoiceAssistant() {
               )}
             </button>
           </div>
-
         </div>
       </div>
     </div>
